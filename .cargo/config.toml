@@ -5,9 +5,9 @@
 # rustflags = ["-C", "link-arg=-LC:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.x/lib/x64"]
 
 [env]
-# Required by some llama.cpp build scripts on Windows.
-# Set to your LLVM/Clang installation if cargo build fails with libclang errors:
-# LIBCLANG_PATH = "C:/Program Files/LLVM/bin"
+# Required by llama-cpp-sys-2 (bindgen) to generate Rust bindings from C++ headers.
+# Points to the directory containing libclang.dll.
+LIBCLANG_PATH = "C:/Program Files/LLVM/bin"
 
 # Force CUDA device ordering to match physical slot order (slot 0 = 4070 Ti Super, slot 1 = 2060)
 CUDA_DEVICE_ORDER = "PCI_BUS_ID"

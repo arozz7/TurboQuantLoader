@@ -7,7 +7,8 @@ Continue.dev, etc.) can use your local models.
 
 ## Status
 
-> **Phase 1 — Foundation & Config** (in progress)
+> **Phase 1 — Foundation & Config** (complete) — skeleton compiles, `list` command works
+> **Phase 2 — Inference Engine** (next)
 
 See [`docs/plan.md`](docs/plan.md) for the full phased implementation plan.
 
@@ -47,22 +48,41 @@ Pick your platform's feature flag to enable GPU acceleration.
 
 ## Build Prerequisites
 
-**All platforms:**
+**All platforms — required:**
 ```sh
 rustup update stable
 ```
+No other dependencies for a CPU-only build (`cargo build --no-default-features`).
 
-**Windows — CUDA:**
-- [CUDA Toolkit 12.x](https://developer.nvidia.com/cuda-downloads)
-- Visual Studio Build Tools (MSVC linker)
-- See `.cargo/config.toml` for optional `LIBCLANG_PATH` hint
+---
 
-**macOS — Metal:**
+**Windows — CUDA (`--features cuda`):**
+
+| Component | Version | Notes |
+|-----------|---------|-------|
+| [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) | 12.x (12.6 recommended) | 13.x untested with llama.cpp |
+| [LLVM](https://github.com/llvm/llvm-project/releases) | Any recent (22.x tested) | Required by bindgen to generate llama.cpp bindings |
+| Visual Studio Build Tools | 2022 (17.x) | MSVC linker + Windows SDK |
+
+After installing LLVM, `.cargo/config.toml` already points `LIBCLANG_PATH` to
+`C:/Program Files/LLVM/bin`. If you installed LLVM elsewhere, update that path.
+
+> **Why LLVM?** `llama-cpp-2` uses `bindgen` to auto-generate Rust FFI bindings
+> from the llama.cpp C++ headers. `bindgen` calls `libclang.dll` to parse those
+> headers. Without it, the build script panics before any Rust code is compiled.
+> This only applies to GPU builds — `--no-default-features` skips `llama-cpp-2`
+> entirely and requires no native tooling beyond Rust itself.
+
+---
+
+**macOS — Metal (`--features metal`):**
 ```sh
 xcode-select --install   # Metal SDK ships with Xcode CLT, nothing else needed
 ```
 
-**Linux — CUDA:**
+---
+
+**Linux — CUDA (`--features cuda`):**
 ```sh
 sudo apt install build-essential libclang-dev
 # + CUDA Toolkit 12.x from NVIDIA

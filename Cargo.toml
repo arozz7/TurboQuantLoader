@@ -19,15 +19,22 @@ default = []
 
 # ── GPU backends (mutually exclusive in practice; pick one) ──────────────────
 # CUDA — NVIDIA GPUs on Windows and Linux. Requires CUDA Toolkit 12.x.
-cuda   = ["llama-cpp-2/cuda",   "dep:nvml-wrapper"]
+cuda   = ["llama-backend", "llama-cpp-2/cuda",   "dep:nvml-wrapper"]
 
 # Metal — Apple Silicon and Intel Macs, plus iOS devices.
 # No extra system dependency; Metal ships with macOS/iOS SDKs.
-metal  = ["llama-cpp-2/metal"]
+metal  = ["llama-backend", "llama-cpp-2/metal"]
 
 # Vulkan — cross-platform GPU compute; primary path for Android.
 # Requires Vulkan SDK on desktop; ships with Android NDK.
-vulkan = ["llama-cpp-2/vulkan"]
+vulkan = ["llama-backend", "llama-cpp-2/vulkan"]
+
+# ── Inference backend ─────────────────────────────────────────────────────────
+# llama-backend enables llama-cpp-2 and all inference code.
+# It is automatically activated by any GPU feature above, but can also be
+# enabled on its own for CPU-only inference: --features llama-backend
+# Requires libclang (LLVM) for the bindgen build step.
+llama-backend = ["dep:llama-cpp-2"]
 
 # ── Optional capabilities ─────────────────────────────────────────────────────
 # TurboQuant native KV compression — off until tq-kv supports Qwen3.5 MoE.
@@ -40,8 +47,9 @@ tui = ["dep:ratatui", "dep:crossterm"]
 [dependencies]
 
 # Inference backend — GGUF loading, multi-GPU, KV cache quantization.
-# GPU backend selected via features above; compiles to CPU-only with no features.
-llama-cpp-2 = { version = "0.1", features = [] }
+# Optional: only compiled in when `llama-backend` (or any GPU feature) is active.
+# Requires libclang / LLVM for the bindgen build step.
+llama-cpp-2 = { version = "0.1", features = [], optional = true }
 
 # TurboQuant KV cache compression (optional — see turbo-kv feature)
 tq-kv      = { version = "*", optional = true }

@@ -1,7 +1,8 @@
 # Phase 01 — Foundation & Config
 
-**Status:** In Progress
+**Status:** Complete
 **Date Started:** 2026-03-27
+**Date Completed:** 2026-03-28
 
 ## Goal
 Compilable project skeleton with all interfaces defined. No inference runs in this phase.
@@ -24,16 +25,25 @@ Compilable project skeleton with all interfaces defined. No inference runs in th
 - `docs/`, `aiChangeLog/`, `scripts/release/`, `scripts/deploy/`
 - `.cargo/`, `.github/workflows/`
 
-## Remaining Phase 1 Tasks
-- [ ] `config/mod.rs` — AppConfig, load_from_file, apply_cli_overrides
-- [ ] `config/server.rs` — ServerConfig
-- [ ] `config/model.rs` — ModelConfig
-- [ ] `config/kv_cache.rs` — KvCacheConfig, KvBits, KvStrategy enums
-- [ ] `model/backend.rs` — ModelBackend trait, GenerateRequest, GenerateEvent, GenerateSummary
-- [ ] `kv_cache/mod.rs` — KvCacheBackend trait, CacheStats
-- [ ] `model/registry.rs` — ModelEntry, ModelRegistry scan
-- [ ] `main.rs` — full CLI with clap subcommands (serve, run, bench, list)
-- [ ] Verify `cargo check --no-default-features` passes
+## Phase 1 Tasks — Completed
+- [x] `config/server.rs` — `ServerConfig` with host, port, concurrency, timeout
+- [x] `config/model.rs` — `ModelConfig` with model_path, mmproj_path, models_dir, n_gpu_layers, tensor_split, context_size, batch_size, threads
+- [x] `config/kv_cache.rs` — `KvCacheConfig`, `KvBits` (2/3/4/8 int serde), `KvStrategy` (snake_case string serde)
+- [x] `config/mod.rs` — `AppConfig`, `CliOverrides`, `load_from_file()`, `apply_cli_overrides()`
+- [x] `model/backend.rs` — `ModelBackend` trait, `GenerateRequest`, `GenerateEvent`, `GenerateSummary`, `GenerateStream`, `SamplerParams`
+- [x] `kv_cache/mod.rs` — `KvCacheBackend` trait, `CacheStats`
+- [x] `model/registry.rs` — `ModelEntry`, `ModelRegistry::scan()`, `ModelRegistry::find_by_name()`
+- [x] `model/mod.rs` — module re-exports
+- [x] `inference/mod.rs`, `server/mod.rs`, `tui/mod.rs` — phase stubs
+- [x] `main.rs` — full clap CLI (serve, run, bench, list); `list` fully functional, others stub with `bail!`
+- [x] `Cargo.toml` — made `llama-cpp-2` optional behind new `llama-backend` feature
+- [x] `cargo check --no-default-features` passes clean
+
+## Cargo.toml Changes
+- `llama-cpp-2` changed from unconditional dep to `optional = true`
+- New `llama-backend` feature added; enabled by `cuda`, `metal`, `vulkan`
+- This allows `cargo check --no-default-features` to run without LLVM/libclang installed
+- Phase 2 `LlamaCppBackend` impl must be gated with `#[cfg(feature = "llama-backend")]`
 
 ## Assumptions & Risks
 - `llama-cpp-2` crate may require specific CUDA Toolkit version — document in README
