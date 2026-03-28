@@ -7,24 +7,48 @@ repository  = "https://github.com/arozz7/TurboQuantLoader"
 license     = "MIT"
 
 # ─── Feature Flags ───────────────────────────────────────────────────────────
+# Default is CPU-only so the crate builds everywhere without extra toolchain setup.
+# Enable the appropriate GPU backend for your platform:
+#
+#   Windows / Linux (NVIDIA):  --features cuda
+#   macOS / iOS (Apple GPU):   --features metal
+#   Android / fallback GPU:    --features vulkan
+#   No GPU at all:             --no-default-features  (or just `default = []`)
 [features]
-default  = ["cuda"]
-# Enable CUDA backend for llama-cpp-2 (requires CUDA Toolkit 12.x)
-cuda     = ["llama-cpp-2/cuda"]
-# TurboQuant native KV cache — off until tq-kv adds Qwen3.5 MoE support
+default = []
+
+# ── GPU backends (mutually exclusive in practice; pick one) ──────────────────
+# CUDA — NVIDIA GPUs on Windows and Linux. Requires CUDA Toolkit 12.x.
+cuda   = ["llama-cpp-2/cuda",   "dep:nvml-wrapper"]
+
+# Metal — Apple Silicon and Intel Macs, plus iOS devices.
+# No extra system dependency; Metal ships with macOS/iOS SDKs.
+metal  = ["llama-cpp-2/metal"]
+
+# Vulkan — cross-platform GPU compute; primary path for Android.
+# Requires Vulkan SDK on desktop; ships with Android NDK.
+vulkan = ["llama-cpp-2/vulkan"]
+
+# ── Optional capabilities ─────────────────────────────────────────────────────
+# TurboQuant native KV compression — off until tq-kv supports Qwen3.5 MoE.
 turbo-kv = ["dep:tq-kv", "dep:turboquant"]
-# ratatui TUI (Phase 5B)
-tui      = ["dep:ratatui", "dep:crossterm"]
+
+# ratatui TUI (Phase 5B) — desktop only.
+tui = ["dep:ratatui", "dep:crossterm"]
 
 # ─── Dependencies ─────────────────────────────────────────────────────────────
 [dependencies]
 
-# Inference backend — GGUF loading, CUDA multi-GPU, KV cache quantization
+# Inference backend — GGUF loading, multi-GPU, KV cache quantization.
+# GPU backend selected via features above; compiles to CPU-only with no features.
 llama-cpp-2 = { version = "0.1", features = [] }
 
-# TurboQuant KV cache compression (optional, see turbo-kv feature)
+# TurboQuant KV cache compression (optional — see turbo-kv feature)
 tq-kv      = { version = "*", optional = true }
 turboquant = { version = "*", optional = true }
+
+# GPU telemetry — NVIDIA only, compiled in only when cuda feature is enabled
+nvml-wrapper = { version = "0.10", optional = true }
 
 # HTTP server (Phase 4)
 axum         = { version = "0.7", features = ["macros"] }
@@ -48,14 +72,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 anyhow    = "1"
 thiserror = "1"
 
-# GPU telemetry via NVML (Phase 3 bench command)
-nvml-wrapper = "0.10"
-
 # Async utilities
 futures = "0.3"
 uuid    = { version = "1", features = ["v4"] }
 
-# TUI — only compiled with `--features tui` (Phase 5B)
+# TUI — compiled only with `--features tui` (Phase 5B, desktop only)
 ratatui   = { version = "0.26", optional = true }
 crossterm = { version = "0.27", optional = true }
 
@@ -66,4 +87,4 @@ lto       = "thin"
 strip     = true
 
 [profile.dev]
-opt-level = 1   # slightly faster builds during development
+opt-level = 1   # slightly faster incremental builds during development

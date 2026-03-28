@@ -12,8 +12,13 @@ env:
 
 jobs:
   check:
-    name: Check & Lint
-    runs-on: windows-latest
+    name: Check & Lint — ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
 
     steps:
       - uses: actions/checkout@v4
@@ -32,12 +37,31 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
 
-      # Build without CUDA feature (CI has no GPU / CUDA toolkit)
-      - name: Cargo check (no CUDA)
+      # CI runners have no GPU drivers; build CPU-only on all platforms.
+      # This validates the codebase compiles cleanly without any GPU backend.
+      - name: Cargo check (CPU-only)
         run: cargo check --no-default-features
 
       - name: Cargo fmt
         run: cargo fmt --all -- --check
 
-      - name: Cargo clippy (no CUDA)
+      - name: Cargo clippy (CPU-only)
         run: cargo clippy --no-default-features -- -D warnings
+
+  # Separate job: validate Metal feature compiles on macOS (no GPU needed to compile)
+  check-metal:
+    name: Check Metal feature — macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-metal-cargo-${{ hashFiles('**/Cargo.toml') }}
+      - name: Cargo check (metal feature)
+        run: cargo check --no-default-features --features metal

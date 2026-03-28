@@ -15,12 +15,26 @@ multi-file or architectural changes). **NO DELETIONS** without explicit confirma
 
 ## Stack
 - **Language:** Rust (edition 2021), `stable` toolchain
-- **Inference backend:** `llama-cpp-2` (GGUF loading, CUDA, multi-GPU tensor split)
+- **Inference backend:** `llama-cpp-2` (GGUF loading, multi-GPU, KV cache quantization)
+- **GPU backends:** CUDA (`--features cuda`), Metal (`--features metal`), Vulkan (`--features vulkan`), CPU-only (default/no features)
 - **KV cache compression:** `tq-kv` / `turboquant` (behind `turbo-kv` feature flag until Qwen3.5 MoE is supported — currently uses llama.cpp native KV quantization)
 - **HTTP server:** `axum` 0.7
 - **CLI:** `clap` 4 (derive)
-- **TUI:** `ratatui` + `crossterm` (Phase 5, behind `tui` feature flag)
+- **TUI:** `ratatui` + `crossterm` (Phase 5, behind `tui` feature flag, desktop only)
 - **Config:** TOML (`config.toml`)
+
+## Platform Targets
+| Platform | GPU | Feature Flag |
+|----------|-----|--------------|
+| Windows | CUDA (NVIDIA) | `--features cuda` |
+| Linux | CUDA (NVIDIA) | `--features cuda` |
+| macOS | Metal (Apple) | `--features metal` |
+| iOS | Metal | `--features metal` (Phase 6) |
+| Android | Vulkan | `--features vulkan` (Phase 6) |
+| Any | CPU-only | *(no features — the default)* |
+
+**The default feature set is empty** — never add a GPU feature to `default = [...]`.
+The crate must compile and run CPU-only on every platform without extra tooling.
 
 ## Implementation Plan
 Full phased plan: `docs/plan.md`
@@ -77,8 +91,28 @@ After each phase, update `aiChangeLog/phase-XX.md` with:
 - Behavior changes
 - Assumptions and risks
 
-## Build Prerequisites
-- Rust stable toolchain (`rustup update stable`)
-- CUDA Toolkit 12.x (for `cuda` feature / `llama-cpp-2`)
-- `LIBCLANG_PATH` set if llama-cpp-2 requires it on Windows
+## Build Prerequisites by Platform
+
+**All platforms (required):**
+- Rust stable toolchain: `rustup update stable`
+
+**Windows (`--features cuda`):**
+- CUDA Toolkit 12.x
 - Visual Studio Build Tools (MSVC linker)
+- `LIBCLANG_PATH` if llama-cpp-2 build requires it (see `.cargo/config.toml`)
+
+**macOS (`--features metal`):**
+- Xcode Command Line Tools: `xcode-select --install`
+- Metal ships with macOS SDK — no extra install
+
+**Linux (`--features cuda`):**
+- CUDA Toolkit 12.x + NVIDIA drivers
+- `build-essential`, `libclang-dev`
+
+**Android (`--features vulkan`, Phase 6):**
+- Android NDK r26+
+- `cargo-ndk`: `cargo install cargo-ndk`
+
+**iOS (`--features metal`, Phase 6):**
+- macOS build machine required (Xcode)
+- `rustup target add aarch64-apple-ios aarch64-apple-ios-sim`

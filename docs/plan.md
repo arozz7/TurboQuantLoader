@@ -7,10 +7,48 @@
 | Language | Rust (edition 2021) |
 | Default port | **7432** |
 | Config format | TOML (`config.toml`) |
-| Primary GPU | RTX 4070 Ti Super — 16 GB (tensor split primary) |
-| Secondary GPU | RTX 2060 — 6 GB (tensor split secondary) |
+| Primary GPU (dev) | RTX 4070 Ti Super — 16 GB (tensor split primary) |
+| Secondary GPU (dev) | RTX 2060 — 6 GB (tensor split secondary) |
 | KV cache default | 4-bit (switchable to 3/2/8 via config) |
 | API compatibility | OpenAI `/v1/chat/completions` |
+
+---
+
+## Platform Support
+
+| Platform | GPU Backend | Feature Flag | Status |
+|----------|------------|--------------|--------|
+| Windows | CUDA (NVIDIA) | `--features cuda` | Phase 2 target |
+| Linux | CUDA (NVIDIA) | `--features cuda` | Phase 2 |
+| macOS (Apple Silicon / Intel) | Metal | `--features metal` | Phase 2 |
+| Any platform | CPU-only | *(no features)* | Phase 2 |
+| Android | Vulkan | `--features vulkan` | Phase 6 |
+| iOS | Metal | `--features metal` | Phase 6 |
+
+**Default feature is empty** (`default = []`) — the crate always compiles and runs on any
+platform in CPU-only mode without requiring GPU drivers or SDKs. GPU acceleration is
+opt-in via feature flags.
+
+### GPU Stats Telemetry
+`nvml-wrapper` (NVIDIA NVML) is only compiled when the `cuda` feature is active.
+On macOS, GPU stats come from the OS-level Metal APIs. On CPU-only builds, the
+`/health` endpoint and bench command report memory stats only (no GPU utilization).
+
+| Feature | GPU stats source |
+|---------|-----------------|
+| `cuda` | nvml-wrapper (NVML) — per-device VRAM + utilization |
+| `metal` | Platform Metal/IOKit query (Phase 2) |
+| `vulkan` | Vulkan device query (Phase 6) |
+| none | Not available |
+
+### Mobile Architecture (Phase 6)
+Mobile requires a **workspace restructure**. Core inference logic moves to a `core` library
+crate with a C FFI layer, enabling:
+- iOS: Swift package wrapping the static library, Metal GPU backend
+- Android: Kotlin/JNI wrapping the shared library, Vulkan GPU backend
+
+Mobile clients can also connect to a desktop TurboQuantLoader server over the local
+network — the OpenAI-compatible API works from any HTTP client.
 
 ---
 
@@ -750,3 +788,81 @@ Model: Qwen3.5-35B-A3B │ 42.3 tok/s │ 312/8192 ctx │ KV: 21MB (3.9x) │ 4
 | 4 | OpenAI API server | `server/` (all) | axum, tokio-stream |
 | 5A | Vision (images in chat) | extend model + server + inference | — |
 | 5B | ratatui TUI | `tui/` (all) | ratatui, crossterm |
+| 6 | Mobile (iOS + Android) | workspace restructure, C FFI layer, platform apps | — |
+
+---
+
+## Phase 6 — Mobile (iOS + Android)
+
+**Goal:** Run TurboQuantLoader on mobile devices either as a local inference server
+(for small models) or as a client app connecting to a desktop server.
+
+### Prerequisites
+Phase 6 requires a **Cargo workspace restructure** before any mobile code is written:
+
+```
+turboquant-loader/        ← workspace root
+  crates/
+    core/                 ← lib crate: all inference logic, no platform assumptions
+    server/               ← bin crate: axum HTTP server (desktop)
+    ffi/                  ← crate: C ABI exports for mobile bindings
+  platforms/
+    ios-app/              ← Xcode project (Swift, uses ffi crate as static lib)
+    android-app/          ← Android Studio project (Kotlin/JNI, uses ffi crate as .so)
+```
+
+The `core` crate exposes no `main()` and no platform-specific code. Everything
+in Phases 1–5 moves there. The `server` crate is a thin bin wrapper around `core`.
+
+### Tasks
+
+#### 6.1 — Workspace restructure
+- Migrate `src/` → `crates/core/src/`
+- Create `crates/server/` wrapping `core`
+- Create `crates/ffi/` with C-compatible exports:
+  ```rust
+  // crates/ffi/src/lib.rs
+  #[no_mangle]
+  pub extern "C" fn tql_create_engine(config_json: *const c_char) -> *mut Engine { ... }
+  #[no_mangle]
+  pub extern "C" fn tql_chat(engine: *mut Engine, request_json: *const c_char, ...) { ... }
+  #[no_mangle]
+  pub extern "C" fn tql_destroy_engine(engine: *mut Engine) { ... }
+  ```
+- All existing tests must pass after move (no logic changes)
+- `aiChangeLog/phase-06-restructure.md`
+
+#### 6.2 — iOS target
+- Cargo target: `aarch64-apple-ios` (physical), `aarch64-apple-ios-sim` (simulator)
+- Build script produces `TurboQuantLoader.xcframework` (fat static lib + headers)
+- Metal backend (`--features metal`) for GPU acceleration
+- SwiftUI app: model picker, chat view, connects to `ffi` crate
+- Models on device: Qwen3.5-4B (J:/llama/Models/unsloth/Qwen3.5-4B-GGUF) — fits in 4–6 GB RAM
+- Alternatively: remote mode — app connects to desktop server at local network IP
+- `aiChangeLog/phase-06-ios.md`
+
+#### 6.3 — Android target
+- Cargo targets: `aarch64-linux-android`, `armv7-linux-androideabi`
+- NDK cross-compilation via `cargo-ndk`
+- Vulkan backend (`--features vulkan`) where available; CPU fallback
+- Kotlin/JNI wrapper around `ffi` crate
+- Jetpack Compose UI mirroring iOS app feature set
+- Same model size constraint as iOS (~4B parameter models)
+- `aiChangeLog/phase-06-android.md`
+
+#### 6.4 — Model size guidance for mobile
+
+| Model | File | Active Params | RAM (IQ3_XXS) | Fits on |
+|-------|------|--------------|---------------|---------|
+| Qwen3.5-4B | Qwen3.5-4B-GGUF | ~4B | ~2 GB | All modern phones |
+| Qwen3.5-9B | Qwen3.5-9B-GGUF | ~9B | ~4 GB | High-end phones (12GB+ RAM) |
+| Qwen3.5-35B | Qwen3.5-35B-A3B-GGUF | ~3.5B active | 14.7 GB | Desktop only |
+
+#### 6.5 — Remote mode (network client)
+Both iOS and Android apps support a "Remote Server" mode:
+- User enters desktop IP + port (e.g. `192.168.1.50:7432`)
+- App uses the OpenAI-compatible `/v1/chat/completions` endpoint directly
+- No local model required; full desktop performance over WiFi
+- This also works from any browser / REST client as a bonus
+
+#### 6.6 — `aiChangeLog/phase-06.md`

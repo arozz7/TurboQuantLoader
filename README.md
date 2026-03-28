@@ -25,39 +25,69 @@ See [`docs/plan.md`](docs/plan.md) for the full phased implementation plan.
 | Vision / multimodal support (mmproj) | 5A | Planned |
 | ratatui TUI with live stats | 5B | Planned |
 
-## Hardware
+## Platform Support
 
-Designed and tested on:
-- RTX 4070 Ti Super — 16 GB VRAM (primary, tensor split index 0)
-- RTX 2060 — 6 GB VRAM (secondary, tensor split index 1)
+| Platform | GPU Backend | Feature Flag | Phase |
+|----------|------------|--------------|-------|
+| Windows | CUDA (NVIDIA) | `--features cuda` | 2 |
+| Linux | CUDA (NVIDIA) | `--features cuda` | 2 |
+| macOS (Apple Silicon / Intel) | Metal | `--features metal` | 2 |
+| Any platform | CPU-only | *(no features)* | 2 |
+| Android | Vulkan | `--features vulkan` | 6 |
+| iOS | Metal | `--features metal` | 6 |
+
+**Default build is CPU-only** — it compiles and runs on any OS without GPU drivers.
+Pick your platform's feature flag to enable GPU acceleration.
+
+## Hardware (Primary Dev Machine)
+
+- RTX 4070 Ti Super — 16 GB VRAM (CUDA device 0, tensor split primary)
+- RTX 2060 — 6 GB VRAM (CUDA device 1, tensor split secondary)
 - Windows 11
 
 ## Build Prerequisites
 
-1. **Rust stable** — `rustup update stable`
-2. **CUDA Toolkit 12.x** — required for `--features cuda` (default)
-   - Download from [developer.nvidia.com/cuda-downloads](https://developer.nvidia.com/cuda-downloads)
-3. **Visual Studio Build Tools** (MSVC linker) — or Visual Studio 2022
-4. **LLVM/Clang** (optional) — only if `llama-cpp-2` build requires `LIBCLANG_PATH`
-   - See `.cargo/config.toml` for path hints
+**All platforms:**
+```sh
+rustup update stable
+```
+
+**Windows — CUDA:**
+- [CUDA Toolkit 12.x](https://developer.nvidia.com/cuda-downloads)
+- Visual Studio Build Tools (MSVC linker)
+- See `.cargo/config.toml` for optional `LIBCLANG_PATH` hint
+
+**macOS — Metal:**
+```sh
+xcode-select --install   # Metal SDK ships with Xcode CLT, nothing else needed
+```
+
+**Linux — CUDA:**
+```sh
+sudo apt install build-essential libclang-dev
+# + CUDA Toolkit 12.x from NVIDIA
+```
 
 ## Quick Start
 
-```powershell
-# Build (CUDA enabled by default)
+```sh
+# CPU-only — works on any platform, no GPU required
 cargo build --release
+
+# Windows / Linux with NVIDIA GPU
+cargo build --release --features cuda
+
+# macOS with Apple GPU
+cargo build --release --features metal
 
 # List available models
 cargo run --release -- list
 
-# Interactive chat
+# Interactive chat (add GPU feature as above)
 cargo run --release -- run
 
 # Start API server
 cargo run --release -- serve
-
-# Build without CUDA (CPU only)
-cargo build --release --no-default-features
 ```
 
 ## Configuration
