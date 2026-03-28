@@ -5,6 +5,7 @@ mod model;
 mod server;
 mod tui;
 
+use std::io::Write as _;
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
@@ -12,6 +13,8 @@ use clap::{Parser, Subcommand};
 use tracing::info;
 
 use config::{load_from_file, AppConfig, CliOverrides, KvBits};
+use inference::engine::{ChatMessage, ChatRequest, InferenceEngine};
+use model::backend::{GenerateEvent, SamplerParams};
 use model::registry::ModelRegistry;
 
 // ─── CLI Definition ───────────────────────────────────────────────────────────
@@ -43,7 +46,6 @@ enum Command {
     List,
 }
 
-/// Arguments shared by commands that load a model.
 #[derive(Parser)]
 struct ServeArgs {
     /// Override the model file to load (overrides `config.toml`).
@@ -88,7 +90,8 @@ struct BenchArgs {
 
 // ─── Entry Point ─────────────────────────────────────────────────────────────
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -98,7 +101,6 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // Load config, falling back to defaults when the file is absent.
     let mut app_config = if cli.config.exists() {
         load_from_file(&cli.config)?
     } else {
@@ -113,12 +115,12 @@ fn main() -> Result<()> {
         Command::Serve(args) => {
             let overrides = serve_overrides(&args)?;
             app_config.apply_cli_overrides(&overrides);
-            cmd_serve(app_config)
+            cmd_serve(app_config).await
         }
         Command::Run(args) => {
             let overrides = run_overrides(&args);
             app_config.apply_cli_overrides(&overrides);
-            cmd_run(app_config)
+            cmd_run(app_config).await
         }
         Command::Bench(args) => {
             app_config.apply_cli_overrides(&CliOverrides::default());
@@ -154,14 +156,93 @@ fn run_overrides(args: &RunArgs) -> CliOverrides {
     }
 }
 
-// ─── Command handlers ────────────────────────────────────────────────────────
+// ─── Command handlers ─────────────────────────────────────────────────────────
 
-fn cmd_serve(_config: AppConfig) -> Result<()> {
+async fn cmd_serve(_config: AppConfig) -> Result<()> {
     bail!("serve command not yet implemented — coming in Phase 4");
 }
 
-fn cmd_run(_config: AppConfig) -> Result<()> {
-    bail!("run command not yet implemented — coming in Phase 2");
+/// Interactive terminal chat session.
+///
+/// Loads the model on a blocking thread, then drives a ChatML REPL until the
+/// user types `/quit`, `/exit`, or sends EOF (Ctrl-D).
+async fn cmd_run(config: AppConfig) -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    println!("Loading model: {}", config.model.model_path.display());
+    println!("Context size:  {} tokens", config.model.context_size);
+    println!("Type /quit or press Ctrl-D to exit.\n");
+
+    // Model loading is blocking; run it off the async executor.
+    let engine = tokio::task::spawn_blocking(move || InferenceEngine::new(config))
+        .await
+        .map_err(|e| anyhow::anyhow!("inference thread panicked: {e}"))??;
+
+    println!("Model ready: {} ({} ctx)\n", engine.model_name(), engine.context_size());
+
+    let stdin = tokio::io::stdin();
+    let mut lines = BufReader::new(stdin).lines();
+    let mut history: Vec<ChatMessage> = Vec::new();
+
+    loop {
+        // Print prompt and flush.
+        print!("> ");
+        std::io::stdout().flush()?;
+
+        let line = match lines.next_line().await? {
+            Some(l) => l,
+            None => break, // EOF (Ctrl-D)
+        };
+        let line = line.trim().to_string();
+
+        if line.is_empty() {
+            continue;
+        }
+        if line == "/quit" || line == "/exit" {
+            break;
+        }
+
+        history.push(ChatMessage { role: "user".into(), content: line });
+
+        let req = ChatRequest {
+            messages: history.clone(),
+            max_tokens: 2048,
+            sampler: SamplerParams::default(),
+        };
+
+        let mut stream = engine.chat(req)?;
+        let mut response = String::new();
+
+        loop {
+            match stream.next_event().await {
+                Some(GenerateEvent::Token(tok)) => {
+                    print!("{tok}");
+                    std::io::stdout().flush()?;
+                    response.push_str(&tok);
+                }
+                Some(GenerateEvent::Done(summary)) => {
+                    println!();
+                    info!(
+                        tokens = summary.tokens_generated,
+                        tps = format!("{:.1}", summary.tokens_per_second),
+                        ctx = summary.context_tokens,
+                        "generation complete"
+                    );
+                    break;
+                }
+                Some(GenerateEvent::Error(e)) => {
+                    eprintln!("\nerror: {e}");
+                    break;
+                }
+                None => break,
+            }
+        }
+
+        history.push(ChatMessage { role: "assistant".into(), content: response });
+        println!();
+    }
+
+    Ok(())
 }
 
 fn cmd_bench(_config: AppConfig, _args: BenchArgs) -> Result<()> {
@@ -182,10 +263,7 @@ fn cmd_list(config: &AppConfig) -> Result<()> {
     }
 
     println!("Found {} model(s) in: {}\n", entries.len(), dir.display());
-    println!(
-        "{:<60}  {:>10}  {}",
-        "Name", "Size", "Flags"
-    );
+    println!("{:<60}  {:>10}  {}", "Name", "Size", "Flags");
     println!("{}", "-".repeat(80));
 
     for entry in &entries {
@@ -197,7 +275,7 @@ fn cmd_list(config: &AppConfig) -> Result<()> {
     Ok(())
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Format a byte count as a human-readable string (GB / MB / KB).
 fn format_size(bytes: u64) -> String {

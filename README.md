@@ -8,7 +8,8 @@ Continue.dev, etc.) can use your local models.
 ## Status
 
 > **Phase 1 — Foundation & Config** (complete) — skeleton compiles, `list` command works
-> **Phase 2 — Inference Engine** (next)
+> **Phase 2 — Inference Engine** (complete) — model loads on both GPUs, tokens stream, `run` command works
+> **Phase 3 — KV Cache & Benchmarks** (next)
 
 See [`docs/plan.md`](docs/plan.md) for the full phased implementation plan.
 
