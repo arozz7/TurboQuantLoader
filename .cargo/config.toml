@@ -4,6 +4,10 @@
 # Uncomment and set if your CUDA toolkit is not auto-detected:
 # rustflags = ["-C", "link-arg=-LC:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.x/lib/x64"]
 
+# NOTE: cmake.exe must be on your system PATH for --features cuda builds.
+# Add to Windows PATH permanently: C:\Program Files\CMake\bin
+# (cannot be set here — cargo [env] replaces PATH entirely rather than appending)
+
 [env]
 # Required by llama-cpp-sys-2 (bindgen) to generate Rust bindings from C++ headers.
 # Points to the directory containing libclang.dll.
