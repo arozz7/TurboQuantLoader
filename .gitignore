@@ -1,0 +1,48 @@
+# Rust
+/target/
+Cargo.lock
+**/*.rs.bk
+
+# Build artifacts
+*.pdb
+*.exp
+*.lib
+*.dll
+*.exe
+
+# CUDA build artifacts
+*.cu.o
+*.fatbin
+
+# Config overrides (user-local, not committed)
+config.local.toml
+
+# Benchmark output
+bench_results.json
+bench_results_*.json
+
+# Logs
+*.log
+logs/
+
+# IDE
+.idea/
+.vscode/settings.json
+.vscode/launch.json
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Env files
+.env
+.env.*
+
+# Large model files — never commit these
+*.gguf
+*.bin
+*.safetensors
+*.pt
+*.pth

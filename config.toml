@@ -1,0 +1,29 @@
+# TurboQuantLoader — default configuration
+# Copy to config.local.toml and edit for local overrides (not committed to git)
+
+[server]
+host                    = "127.0.0.1"
+port                    = 7432
+max_concurrent_requests = 4
+request_timeout_secs    = 300
+
+[model]
+model_path   = "J:/llama/Models/unsloth/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-UD-IQ3_XXS.gguf"
+# mmproj_path = "J:/llama/Models/unsloth/Qwen3.5-35B-A3B-GGUF/mmproj-F32.gguf"  # Phase 5 vision
+models_dir   = "J:/llama/Models"
+n_gpu_layers = -1               # -1 = offload all layers to GPU
+tensor_split = [16.0, 6.0]      # RTX 4070 Ti Super (16 GB) + RTX 2060 (6 GB)
+context_size = 8192             # tokens; increase to 32768+ once stable
+batch_size   = 512
+threads      = 8
+
+[kv_cache]
+# bits: 2 | 3 | 4 | 8
+# 4-bit (Q4_0) = ~3.9x compression, near-zero quality loss — recommended default
+# 3-bit        = closest to true TurboQuant target; maps to Q4_0 until tq-kv supports Qwen3.5 MoE
+# 8-bit (Q8_0) = conservative option, ~2x compression
+bits             = 4
+# strategy: "llama_native" | "turbo_quant"
+# "turbo_quant" requires building with --features turbo-kv
+strategy         = "llama_native"
+# memory_budget_mb = 4096   # optional cap; omit for unlimited
