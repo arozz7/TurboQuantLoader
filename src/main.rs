@@ -1,4 +1,5 @@
 mod config;
+mod gpu_stats;
 mod inference;
 mod kv_cache;
 mod model;
@@ -8,11 +9,11 @@ mod tui;
 use std::io::Write as _;
 use std::path::PathBuf;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing::info;
 
-use config::{load_from_file, AppConfig, CliOverrides, KvBits};
+use config::{load_from_file, AppConfig, CliOverrides, KvBits, KvCacheConfig};
 use inference::engine::{ChatMessage, ChatRequest, InferenceEngine};
 use model::backend::{GenerateEvent, SamplerParams};
 use model::registry::ModelRegistry;
@@ -92,6 +93,10 @@ struct BenchArgs {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Disable llama.cpp CUDA Graphs globally to prevent WDDM VRAM fragmentation deadlocks
+    // when executing deeply contextual batches on Windows.
+    std::env::set_var("GGML_CUDA_NO_GRAPHS", "1");
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -124,7 +129,7 @@ async fn main() -> Result<()> {
         }
         Command::Bench(args) => {
             app_config.apply_cli_overrides(&CliOverrides::default());
-            cmd_bench(app_config, args)
+            cmd_bench(app_config, args).await
         }
         Command::List => cmd_list(&app_config),
     }
@@ -158,8 +163,8 @@ fn run_overrides(args: &RunArgs) -> CliOverrides {
 
 // ─── Command handlers ─────────────────────────────────────────────────────────
 
-async fn cmd_serve(_config: AppConfig) -> Result<()> {
-    bail!("serve command not yet implemented — coming in Phase 4");
+async fn cmd_serve(config: AppConfig) -> Result<()> {
+    server::serve(config).await
 }
 
 /// Interactive terminal chat session.
@@ -245,8 +250,156 @@ async fn cmd_run(config: AppConfig) -> Result<()> {
     Ok(())
 }
 
-fn cmd_bench(_config: AppConfig, _args: BenchArgs) -> Result<()> {
-    bail!("bench command not yet implemented — coming in Phase 3");
+/// Benchmark (context_size × kv_bits) combinations against a fixed prompt.
+///
+/// The model is loaded once; each combination only rebuilds the `LlamaContext`
+/// (~50 ms). Results are printed as a table and optionally written to JSON.
+async fn cmd_bench(config: AppConfig, args: BenchArgs) -> Result<()> {
+    // ── Parse arguments ───────────────────────────────────────────────────────
+    let context_sizes: Vec<u32> = args
+        .context_sizes
+        .split(',')
+        .map(|s| {
+            s.trim()
+                .parse::<u32>()
+                .map_err(|_| anyhow::anyhow!("invalid context size: '{}'", s.trim()))
+        })
+        .collect::<Result<_>>()?;
+
+    let kv_bits_list: Vec<KvBits> = args
+        .bits
+        .split(',')
+        .map(|s| {
+            let n: u8 = s
+                .trim()
+                .parse()
+                .map_err(|_| anyhow::anyhow!("invalid kv_bits: '{}'", s.trim()))?;
+            KvBits::try_from(n).map_err(|e| anyhow::anyhow!("{e}"))
+        })
+        .collect::<Result<_>>()?;
+
+    // ── Load bench prompt ─────────────────────────────────────────────────────
+    let prompt_path = std::path::Path::new("docs/bench_prompt.txt");
+    let prompt = if prompt_path.exists() {
+        std::fs::read_to_string(prompt_path)
+            .map_err(|e| anyhow::anyhow!("failed to read bench prompt: {e}"))?
+    } else {
+        "Explain the transformer attention mechanism in detail.".to_string()
+    };
+
+    // ── Load model ────────────────────────────────────────────────────────────
+    println!(
+        "Benchmarking: {} context sizes × {} kv_bits = {} configurations\n",
+        context_sizes.len(),
+        kv_bits_list.len(),
+        context_sizes.len() * kv_bits_list.len()
+    );
+    println!("Loading model: {}", config.model.model_path.display());
+
+    let engine = tokio::task::spawn_blocking(move || InferenceEngine::new(config))
+        .await
+        .map_err(|e| anyhow::anyhow!("inference thread panicked: {e}"))??;
+
+    println!("Model ready: {}\n", engine.model_name());
+
+    // ── Print table header ────────────────────────────────────────────────────
+    println!(
+        "{:<12} {:<8} {:>8} {:>10} {:>10}",
+        "ctx_size", "kv_bits", "tokens", "tps", "ctx_used"
+    );
+    println!("{}", "-".repeat(52));
+
+    #[derive(serde::Serialize)]
+    struct BenchRow {
+        ctx_size: u32,
+        kv_bits: u8,
+        tokens_generated: u32,
+        tokens_per_second: f32,
+        context_tokens: u32,
+    }
+    let mut rows: Vec<BenchRow> = Vec::new();
+
+    // ── Run combinations ──────────────────────────────────────────────────────
+    for &ctx_size in &context_sizes {
+        for &bits in &kv_bits_list {
+            let kv_cfg = KvCacheConfig { bits, ..KvCacheConfig::default() };
+
+            // Reconfigure is blocking — move off the async executor.
+            let reconf_result = {
+                let engine_ref = &engine;
+                let kv_cfg_ref = &kv_cfg;
+                tokio::task::block_in_place(|| {
+                    engine_ref.reconfigure_context(ctx_size, kv_cfg_ref)
+                })
+            };
+            if let Err(e) = reconf_result {
+                eprintln!(
+                    "  skip ctx={ctx_size} bits={}: reconfigure failed: {e}",
+                    u8::from(bits)
+                );
+                continue;
+            }
+
+            let req = ChatRequest {
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: prompt.clone(),
+                }],
+                max_tokens: 256,
+                sampler: SamplerParams { temperature: 0.1, ..SamplerParams::default() },
+            };
+
+            let mut stream = engine.chat(req)?;
+            let mut summary_opt = None;
+
+            loop {
+                match stream.next_event().await {
+                    Some(GenerateEvent::Token(_)) => {}
+                    Some(GenerateEvent::Done(s)) => {
+                        summary_opt = Some(s);
+                        break;
+                    }
+                    Some(GenerateEvent::Error(e)) => {
+                        eprintln!(
+                            "  error ctx={ctx_size} bits={}: {e}",
+                            u8::from(bits)
+                        );
+                        break;
+                    }
+                    None => break,
+                }
+            }
+
+            if let Some(summary) = summary_opt {
+                println!(
+                    "{:<12} {:<8} {:>8} {:>10.1} {:>10}",
+                    ctx_size,
+                    u8::from(bits),
+                    summary.tokens_generated,
+                    summary.tokens_per_second,
+                    summary.context_tokens,
+                );
+                rows.push(BenchRow {
+                    ctx_size,
+                    kv_bits: u8::from(bits),
+                    tokens_generated: summary.tokens_generated,
+                    tokens_per_second: summary.tokens_per_second,
+                    context_tokens: summary.context_tokens,
+                });
+            }
+        }
+    }
+
+    // ── Optional JSON output ──────────────────────────────────────────────────
+    if let Some(ref path) = args.output {
+        let json = serde_json::to_string_pretty(&rows)
+            .map_err(|e| anyhow::anyhow!("JSON serialization failed: {e}"))?;
+        std::fs::write(path, json)
+            .map_err(|e| anyhow::anyhow!("failed to write output file: {e}"))?;
+        println!("\nResults written to: {}", path.display());
+    }
+
+    Ok(())
 }
 
 /// List all GGUF models discovered in `config.model.models_dir`.

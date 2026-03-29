@@ -116,4 +116,16 @@ pub trait ModelBackend: Send + Sync {
     ///
     /// Must be called before the first [`generate`](Self::generate) invocation.
     fn apply_kv_cache_config(&mut self, cfg: &KvCacheConfig) -> Result<()>;
+
+    /// Tear down and recreate the inference context with new parameters.
+    ///
+    /// Model weights remain loaded — only the `LlamaContext` is rebuilt, which
+    /// is fast (~50 ms). Used by the `bench` command to test multiple
+    /// (context_size × kv_bits) configurations without reloading the model.
+    ///
+    /// Default implementation is a no-op (backends that don't support
+    /// reconfiguration at runtime simply ignore the call).
+    fn reconfigure_context(&self, _n_ctx: u32, _kv_cfg: &KvCacheConfig) -> Result<()> {
+        Ok(())
+    }
 }

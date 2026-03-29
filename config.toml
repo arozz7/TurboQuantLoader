@@ -22,15 +22,15 @@ models_dir   = "J:/llama/Models"   # root dir for `list` command; override per-p
 # ── GPU configuration ─────────────────────────────────────────────────────────
 # n_gpu_layers: number of layers to offload to GPU (-1 = all layers)
 # Set to 0 for CPU-only inference on any platform.
-n_gpu_layers = -1
+n_gpu_layers = 39
 
 # tensor_split: proportional VRAM weights per GPU device (CUDA/Metal/Vulkan multi-GPU)
 # Windows dev machine: RTX 4070 Ti Super (16 GB) + RTX 2060 (6 GB)
 # Single GPU or CPU-only: tensor_split = [1.0]
 # macOS Apple Silicon (unified memory): tensor_split = [1.0]
-tensor_split = [16.0, 6.0]
+tensor_split = [1.0]
 
-context_size = 262144             # tokens; increase to 32768+ once stable
+context_size = 40960             # tokens; increase to 32768+ once stable
 batch_size   = 512
 threads      = 8                # CPU threads for non-GPU ops; tune to your core count
 

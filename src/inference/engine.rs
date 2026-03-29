@@ -2,8 +2,7 @@ use anyhow::Result;
 use tracing::info;
 
 use crate::config::{AppConfig, KvCacheConfig};
-use crate::config::ModelConfig;
-use crate::kv_cache::{CacheStats, KvCacheBackend};
+use crate::kv_cache::{create_kv_cache, KvCacheBackend};
 use crate::model::backend::{GenerateRequest, ModelBackend, SamplerParams};
 
 use super::stream::TokenStream;
@@ -30,23 +29,6 @@ pub struct ChatRequest {
     pub sampler: SamplerParams,
 }
 
-// ── NoopKvCache ───────────────────────────────────────────────────────────────
-
-/// Phase 2 stub — does nothing. Replaced by `LlamaNativeCache` in Phase 3.
-pub struct NoopKvCache;
-
-impl KvCacheBackend for NoopKvCache {
-    fn configure(&mut self, _cfg: &KvCacheConfig) -> Result<()> {
-        Ok(())
-    }
-
-    fn stats(&self) -> CacheStats {
-        CacheStats::default()
-    }
-
-    fn reset(&mut self) {}
-}
-
 // ── InferenceEngine ───────────────────────────────────────────────────────────
 
 /// Orchestrates model loading, chat-template formatting, and streaming generation.
@@ -55,7 +37,8 @@ impl KvCacheBackend for NoopKvCache {
 /// The backend is selected at construction time via [`create_backend`].
 pub struct InferenceEngine {
     backend: Box<dyn ModelBackend>,
-    _kv_cache: Box<dyn KvCacheBackend>, // Phase 3: replaced by LlamaNativeCache
+    /// KV cache metadata tracker — used by Phase 4 stats endpoints.
+    _kv_cache: Box<dyn KvCacheBackend>,
 }
 
 impl InferenceEngine {
@@ -64,13 +47,11 @@ impl InferenceEngine {
     /// This is a **blocking** call (model weights are loaded from disk). Wrap in
     /// `tokio::task::spawn_blocking` when calling from an async context.
     pub fn new(config: AppConfig) -> Result<Self> {
-        let backend = create_backend(&config.model)?;
+        let kv_cache = create_kv_cache(&config.kv_cache);
+        let backend = create_backend(&config)?;
         info!(model = backend.model_name(), "inference engine ready");
 
-        Ok(Self {
-            backend,
-            _kv_cache: Box::new(NoopKvCache),
-        })
+        Ok(Self { backend, _kv_cache: kv_cache })
     }
 
     /// Begin generating the next assistant turn for `req`.
@@ -96,6 +77,14 @@ impl InferenceEngine {
     /// Context window size in tokens.
     pub fn context_size(&self) -> u32 {
         self.backend.context_size()
+    }
+
+    /// Tear down and recreate the inference context with new parameters.
+    ///
+    /// Model weights remain loaded. Used by the `bench` command to sweep
+    /// (context_size × kv_bits) combinations without reloading the model.
+    pub fn reconfigure_context(&self, n_ctx: u32, kv_cfg: &KvCacheConfig) -> Result<()> {
+        self.backend.reconfigure_context(n_ctx, kv_cfg)
     }
 }
 
@@ -129,6 +118,8 @@ fn format_messages(messages: &[ChatMessage]) -> String {
     }
 
     // Prompt the model to begin its response.
+    // Thinking tokens (<think>...</think>) are parsed and streamed as Anthropic
+    // thinking content blocks by the server layer — do not suppress them here.
     out.push_str("<|im_start|>assistant\n");
     out
 }
@@ -137,13 +128,13 @@ fn format_messages(messages: &[ChatMessage]) -> String {
 
 /// Instantiate the appropriate [`ModelBackend`] for the active feature set.
 #[cfg(feature = "llama-backend")]
-fn create_backend(config: &ModelConfig) -> Result<Box<dyn ModelBackend>> {
+fn create_backend(config: &AppConfig) -> Result<Box<dyn ModelBackend>> {
     use crate::model::llama_cpp::LlamaCppBackend;
-    Ok(Box::new(LlamaCppBackend::load(config)?))
+    Ok(Box::new(LlamaCppBackend::load_full(&config.model, &config.kv_cache)?))
 }
 
 #[cfg(not(feature = "llama-backend"))]
-fn create_backend(_config: &ModelConfig) -> Result<Box<dyn ModelBackend>> {
+fn create_backend(_config: &AppConfig) -> Result<Box<dyn ModelBackend>> {
     anyhow::bail!(
         "No inference backend is enabled.\n\
          Build with one of:\n\

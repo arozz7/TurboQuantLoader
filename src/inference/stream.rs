@@ -22,6 +22,12 @@ impl TokenStream {
         self.rx.recv().await
     }
 
+    /// Unwrap the underlying [`GenerateStream`] for use with async stream adapters
+    /// (e.g. `tokio_stream::wrappers::ReceiverStream` in the HTTP server).
+    pub fn into_inner(self) -> GenerateStream {
+        self.rx
+    }
+
     /// Drain the stream and return the full text and final [`GenerateSummary`].
     ///
     /// # Errors

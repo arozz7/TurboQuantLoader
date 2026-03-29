@@ -5,6 +5,7 @@
 #![cfg(feature = "llama-backend")]
 
 use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::thread;
 
@@ -20,6 +21,7 @@ use llama_cpp_2::model::{AddBos, LlamaModel, Special};
 
 use crate::config::{KvBits, KvCacheConfig, ModelConfig};
 use crate::inference::sampler::build_sampler;
+use crate::kv_cache::PrefixCache;
 use crate::model::backend::{
     GenerateEvent, GenerateRequest, GenerateSummary, GenerateStream, ModelBackend,
 };
@@ -33,6 +35,15 @@ enum BackendCommand {
         req: GenerateRequest,
         event_tx: tokio::sync::mpsc::Sender<GenerateEvent>,
     },
+    /// Tear down the current `LlamaContext` and rebuild with new parameters.
+    ///
+    /// Model weights remain loaded. Used by the bench command to test multiple
+    /// (context_size × kv_bits) combinations without reloading the model.
+    ReconfigureContext {
+        n_ctx: u32,
+        kv_config: KvCacheConfig,
+        result_tx: mpsc::SyncSender<Result<u32>>, // returns actual n_ctx on success
+    },
 }
 
 /// llama.cpp inference backend.
@@ -42,7 +53,8 @@ enum BackendCommand {
 /// the thread via a synchronous command channel.
 pub struct LlamaCppBackend {
     model_name: String,
-    context_size: u32,
+    /// Updated atomically when `reconfigure_context` recreates the context.
+    context_size: AtomicU32,
     cmd_tx: mpsc::SyncSender<BackendCommand>,
 }
 
@@ -52,9 +64,15 @@ pub struct LlamaCppBackend {
 unsafe impl Send for LlamaCppBackend {}
 unsafe impl Sync for LlamaCppBackend {}
 
-impl ModelBackend for LlamaCppBackend {
-    fn load(config: &ModelConfig) -> Result<Self> {
-        let config = config.clone();
+impl LlamaCppBackend {
+    /// Load a model with explicit KV cache configuration.
+    ///
+    /// Called by [`ModelBackend::load`] (with a default KV config) and by
+    /// `InferenceEngine` (with the user-configured KV config) to avoid a
+    /// redundant context rebuild on startup.
+    pub fn load_full(model_config: &ModelConfig, kv_config: &KvCacheConfig) -> Result<Self> {
+        let model_config = model_config.clone();
+        let kv_config = kv_config.clone();
 
         // Startup handshake: the inference thread signals ready (or error) once.
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(String, u32)>>(0);
@@ -63,7 +81,7 @@ impl ModelBackend for LlamaCppBackend {
         thread::Builder::new()
             .name("llama-inference".into())
             .spawn(move || {
-                if let Err(e) = inference_thread_main(&config, ready_tx.clone(), cmd_rx) {
+                if let Err(e) = inference_thread_main(&model_config, &kv_config, ready_tx.clone(), cmd_rx) {
                     let _ = ready_tx.send(Err(e));
                 }
             })
@@ -74,7 +92,13 @@ impl ModelBackend for LlamaCppBackend {
             .context("inference thread exited before signalling ready")??;
 
         info!(model = %model_name, context_size, "model loaded successfully");
-        Ok(Self { model_name, context_size, cmd_tx })
+        Ok(Self { model_name, context_size: AtomicU32::new(context_size), cmd_tx })
+    }
+}
+
+impl ModelBackend for LlamaCppBackend {
+    fn load(config: &ModelConfig) -> Result<Self> {
+        Self::load_full(config, &KvCacheConfig::default())
     }
 
     /// Approximate tokenization for context-size estimation only.
@@ -93,7 +117,7 @@ impl ModelBackend for LlamaCppBackend {
     }
 
     fn context_size(&self) -> u32 {
-        self.context_size
+        self.context_size.load(Ordering::Relaxed)
     }
 
     fn model_name(&self) -> &str {
@@ -108,9 +132,23 @@ impl ModelBackend for LlamaCppBackend {
         Ok(event_rx)
     }
 
-    fn apply_kv_cache_config(&mut self, _cfg: &KvCacheConfig) -> Result<()> {
-        // KV cache type is baked into the context at creation time inside the
-        // inference thread. Nothing to do here post-load.
+    fn apply_kv_cache_config(&mut self, cfg: &KvCacheConfig) -> Result<()> {
+        self.reconfigure_context(self.context_size.load(Ordering::Relaxed), cfg)
+    }
+
+    fn reconfigure_context(&self, n_ctx: u32, kv_cfg: &KvCacheConfig) -> Result<()> {
+        let (result_tx, result_rx) = mpsc::sync_channel(0);
+        self.cmd_tx
+            .send(BackendCommand::ReconfigureContext {
+                n_ctx,
+                kv_config: kv_cfg.clone(),
+                result_tx,
+            })
+            .map_err(|_| anyhow::anyhow!("inference thread has stopped"))?;
+        let new_ctx_size = result_rx
+            .recv()
+            .context("inference thread dropped result channel")??;
+        self.context_size.store(new_ctx_size, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -135,6 +173,7 @@ fn kv_cache_type(bits: &KvBits) -> KvCacheType {
 /// processes [`BackendCommand`]s until the sender side is dropped.
 fn inference_thread_main(
     config: &ModelConfig,
+    kv_config: &KvCacheConfig,
     ready_tx: mpsc::SyncSender<Result<(String, u32)>>,
     cmd_rx: mpsc::Receiver<BackendCommand>,
 ) -> Result<()> {
@@ -149,14 +188,14 @@ fn inference_thread_main(
 
     let mut model_params = LlamaModelParams::default().with_n_gpu_layers(n_gpu);
 
-    if config.tensor_split.len() > 1 {
+    if !config.tensor_split.is_empty() {
         // Device indices 0…N map to the physical GPUs detected by ggml.
-        // For the dev machine: 0 = RTX 4070 Ti Super, 1 = RTX 2060.
         let devices: Vec<usize> = (0..config.tensor_split.len()).collect();
         model_params = model_params
             .with_devices(&devices)
             .context("failed to configure GPU devices for tensor split")?;
-        debug!(devices = ?devices, "multi-GPU tensor split configured");
+
+        debug!(devices = ?devices, "GPU allocation configured");
     }
 
     // ── Load model ────────────────────────────────────────────────────────────
@@ -171,24 +210,9 @@ fn inference_thread_main(
         .unwrap_or("unknown")
         .to_string();
 
-    // ── Context params ────────────────────────────────────────────────────────
-    let ctx_size = NonZeroU32::new(config.context_size)
-        .unwrap_or_else(|| NonZeroU32::new(8192).expect("constant is non-zero"));
-
-    let kv_type = kv_cache_type(&crate::config::KvBits::Four); // default; Phase 3 reads from config
-
-    let ctx_params = LlamaContextParams::default()
-        .with_n_ctx(Some(ctx_size))
-        .with_n_batch(config.batch_size)
-        .with_n_threads(config.threads as i32)
-        .with_n_threads_batch(config.threads as i32)
-        .with_type_k(kv_type)
-        .with_type_v(kv_type);
-
     // ── Create context (persistent for the thread lifetime) ───────────────────
-    let mut ctx = model
-        .new_context(&backend, ctx_params)
-        .context("failed to create llama context")?;
+    let mut ctx = rebuild_context(&backend, &model, config, config.context_size, kv_config)
+        .context("failed to create initial llama context")?;
 
     let actual_ctx_size = ctx.n_ctx();
 
@@ -198,12 +222,28 @@ fn inference_thread_main(
         .map_err(|_| anyhow::anyhow!("caller dropped the ready channel before model loaded"))?;
 
     // ── Command loop ──────────────────────────────────────────────────────────
+    let mut prefix_cache = PrefixCache::new();
+
     for cmd in &cmd_rx {
         match cmd {
             BackendCommand::Generate { req, event_tx } => {
-                ctx.clear_kv_cache();
-                if let Err(e) = do_generate(&model, &mut ctx, &req, &event_tx) {
-                    let _ = event_tx.try_send(GenerateEvent::Error(e.to_string()));
+                if let Err(e) = do_generate(&model, &mut ctx, &req, &event_tx, &mut prefix_cache) {
+                    prefix_cache.invalidate();
+                    let _ = event_tx.blocking_send(GenerateEvent::Error(e.to_string()));
+                }
+            }
+            BackendCommand::ReconfigureContext { n_ctx, kv_config, result_tx } => {
+                let result = rebuild_context(&backend, &model, &config, n_ctx, &kv_config);
+                match result {
+                    Ok(new_ctx) => {
+                        ctx = new_ctx;
+                        // Context was rebuilt — KV cache is empty.
+                        prefix_cache.invalidate();
+                        let _ = result_tx.send(Ok(ctx.n_ctx()));
+                    }
+                    Err(e) => {
+                        let _ = result_tx.send(Err(e));
+                    }
                 }
             }
         }
@@ -212,14 +252,47 @@ fn inference_thread_main(
     Ok(())
 }
 
+// ── Context Builder ──────────────────────────────────────────────────────────
+
+/// Tear down and rebuild a [`LlamaContext`] with fresh parameters.
+///
+/// Reuses the already-loaded `model` weights — only the context buffers are
+/// reallocated. Called once on startup and again by [`ReconfigureContext`]
+/// commands from the bench command.
+fn rebuild_context<'a>(
+    backend: &'a LlamaBackend,
+    model: &'a LlamaModel,
+    config: &ModelConfig,
+    n_ctx: u32,
+    kv_config: &KvCacheConfig,
+) -> Result<llama_cpp_2::context::LlamaContext<'a>> {
+    let ctx_size = NonZeroU32::new(n_ctx)
+        .unwrap_or_else(|| NonZeroU32::new(8192).expect("constant is non-zero"));
+    let kv_type = kv_cache_type(&kv_config.bits);
+    let ctx_params = LlamaContextParams::default()
+        .with_n_ctx(Some(ctx_size))
+        .with_n_batch(config.batch_size)
+        .with_n_threads(config.threads as i32)
+        .with_n_threads_batch(config.threads as i32)
+        .with_type_k(kv_type)
+        .with_type_v(kv_type);
+    model.new_context(backend, ctx_params).context("failed to create llama context")
+}
+
 // ── Generation ───────────────────────────────────────────────────────────────
 
 /// Run one generation request, streaming tokens through `event_tx`.
+///
+/// Uses `prefix_cache` to skip re-decoding tokens that are already resident
+/// in the llama.cpp KV cache from a previous request.  On a warm cache the
+/// only tokens that need prefilling are the new conversation turns appended
+/// since the last request (typically 50–500 tokens rather than 7 000+).
 fn do_generate(
     model: &LlamaModel,
     ctx: &mut llama_cpp_2::context::LlamaContext<'_>,
     req: &GenerateRequest,
     event_tx: &tokio::sync::mpsc::Sender<GenerateEvent>,
+    prefix_cache: &mut PrefixCache,
 ) -> Result<()> {
     let start = std::time::Instant::now();
 
@@ -228,14 +301,74 @@ fn do_generate(
         .str_to_token(&req.prompt, AddBos::Always)
         .context("failed to tokenize prompt")?;
     let prompt_len = prompt_tokens.len();
-    debug!(tokens = prompt_len, "prompt tokenised");
 
-    // Prefill: decode the entire prompt in one batch.
-    let mut batch = LlamaBatch::new(prompt_len.max(1), 1);
-    batch
-        .add_sequence(&prompt_tokens, 0, false)
-        .context("failed to add prompt sequence to batch")?;
-    ctx.decode(&mut batch).context("prompt prefill decode failed")?;
+    // ── Prefix cache ─────────────────────────────────────────────────────────
+    //
+    // Find how many leading tokens are already in the KV cache.
+    // Always re-decode at least the last token to obtain fresh logits for
+    // the first generated token.
+    let prompt_token_ids: Vec<i32> = prompt_tokens.iter().map(|t| t.0).collect();
+    let raw_prefix = prefix_cache.common_prefix_len(&prompt_token_ids);
+    let n_past = raw_prefix.saturating_sub(1).min(prompt_len.saturating_sub(1));
+
+    if n_past == 0 {
+        ctx.clear_kv_cache();
+        debug!(prompt_tokens = prompt_len, n_past = 0, "prefill: cold cache");
+    } else {
+        // Remove any stale KV entries that follow the reusable prefix
+        // (e.g. tokens generated in the previous turn that are no longer
+        // part of the new prompt at or after position n_past).
+        let _ = ctx.clear_kv_cache_seq(Some(0), Some(n_past as u32), None);
+        debug!(
+            prompt_tokens = prompt_len,
+            n_past,
+            new_tokens = prompt_len - n_past,
+            "prefill: warm cache hit"
+        );
+    }
+
+    // Prefill: decode only the tokens that are not yet in the KV cache.
+    // Processing all tokens in one shot would fail when the new suffix
+    // exceeds n_batch; chunk it accordingly.
+    let n_batch = ctx.n_batch() as usize;
+    let mut batch = LlamaBatch::new(n_batch, 1);
+    let new_tokens = &prompt_tokens[n_past..];
+    let n_chunks = new_tokens.chunks(n_batch).count();
+
+    for (chunk_idx, chunk) in new_tokens.chunks(n_batch).enumerate() {
+        batch.clear();
+        let is_last_chunk = chunk_idx == n_chunks - 1;
+
+        // Log prefill progress periodically to avoid silent freezes, especially for large contexts.
+        if n_chunks > 1 && chunk_idx % std::cmp::max(1, n_chunks / 20) == 0 {
+            info!(
+                "prefill progress: chunk {}/{} ({} new tokens)",
+                chunk_idx + 1,
+                n_chunks,
+                new_tokens.len()
+            );
+        }
+        for (i, &token) in chunk.iter().enumerate() {
+            let pos = (n_past + chunk_idx * n_batch + i) as i32;
+            // Only request logits for the very last token of the last chunk —
+            // that is the position we sample the first generated token from.
+            let need_logits = is_last_chunk && i == chunk.len() - 1;
+            batch
+                .add(token, pos, &[0], need_logits)
+                .context("failed to add token to prefill batch")?;
+        }
+        if let Err(e) = ctx.decode(&mut batch) {
+            if n_past > 0 {
+                warn!("warm cache prefill failed (likely M-RoPE sequence mismatch); retrying with cold cache...");
+                prefix_cache.invalidate();
+                return do_generate(model, ctx, req, event_tx, prefix_cache);
+            }
+            return Err(anyhow::Error::from(e).context("prompt prefill decode failed"));
+        }
+    }
+
+    // Record the full prompt in the cache so the next request can skip it.
+    prefix_cache.update(prompt_token_ids);
 
     // Build the sampler and warm it up with the prompt tokens so the repetition
     // penalty window covers what was already in the prompt.
@@ -268,13 +401,20 @@ fn do_generate(
         }
 
         // Forward the token to the caller; abort if the receiver is gone.
-        if event_tx.try_send(GenerateEvent::Token(text)).is_err() {
+        // blocking_send is correct here: this runs on a dedicated OS thread,
+        // so blocking until the async consumer drains the channel is safe and
+        // prevents the Done event from being lost when the GPU outpaces HTTP.
+        if event_tx.blocking_send(GenerateEvent::Token(text)).is_err() {
             break;
         }
 
         sampler.accept(token);
         tokens_generated += 1;
         pos += 1;
+
+        if tokens_generated % 20 == 0 {
+            info!("actively generating: {} tokens elapsed...", tokens_generated);
+        }
 
         // Decode the new token to update the KV cache.
         batch.clear();
@@ -291,7 +431,7 @@ fn do_generate(
         0.0
     };
 
-    let _ = event_tx.try_send(GenerateEvent::Done(GenerateSummary {
+    let _ = event_tx.blocking_send(GenerateEvent::Done(GenerateSummary {
         tokens_generated,
         tokens_per_second: tps,
         context_tokens: prompt_len as u32 + tokens_generated,

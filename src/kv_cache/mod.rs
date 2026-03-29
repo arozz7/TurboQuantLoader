@@ -1,6 +1,14 @@
 use anyhow::Result;
+use tracing::warn;
 
-use crate::config::KvCacheConfig;
+use crate::config::{KvCacheConfig, KvStrategy};
+
+pub mod llama_native;
+pub mod prefix_cache;
+pub mod turbo_quant;
+
+pub use llama_native::LlamaNativeCache;
+pub use prefix_cache::PrefixCache;
 
 /// Live statistics from the active KV cache.
 #[derive(Debug, Clone, Default)]
@@ -19,17 +27,8 @@ pub struct CacheStats {
 }
 
 /// Abstraction over KV cache backends.
-///
-/// Both [`LlamaNativeCache`](crate::kv_cache::llama_native::LlamaNativeCache)
-/// (Track A, Phase 3) and
-/// [`TurboQuantCache`](crate::kv_cache::turbo_quant::TurboQuantCache)
-/// (Track B, `turbo-kv` feature, Phase 3) implement this trait. The active
-/// backend is selected at startup via [`create_kv_cache`](crate::kv_cache::create_kv_cache);
-/// all callers depend only on this trait.
 pub trait KvCacheBackend: Send + Sync {
     /// Apply quantization settings and memory budget from `cfg`.
-    ///
-    /// Must be called before the first inference request.
     fn configure(&mut self, cfg: &KvCacheConfig) -> Result<()>;
 
     /// Return a snapshot of current cache memory usage and compression stats.
@@ -37,4 +36,30 @@ pub trait KvCacheBackend: Send + Sync {
 
     /// Evict all cached KV entries, equivalent to clearing the conversation context.
     fn reset(&mut self);
+}
+
+/// Instantiate the appropriate [`KvCacheBackend`] for the configured strategy.
+///
+/// Falls back to [`LlamaNativeCache`] with a warning when the `turbo-kv` feature
+/// is requested but not compiled in.
+pub fn create_kv_cache(cfg: &KvCacheConfig) -> Box<dyn KvCacheBackend> {
+    match cfg.strategy {
+        KvStrategy::LlamaNative => Box::new(LlamaNativeCache::new()),
+        KvStrategy::TurboQuant => {
+            #[cfg(feature = "turbo-kv")]
+            {
+                use turbo_quant::turbo_quant_impl::TurboQuantCache;
+                Box::new(TurboQuantCache::new())
+            }
+            #[cfg(not(feature = "turbo-kv"))]
+            {
+                warn!(
+                    "KV strategy 'turbo_quant' requested but the `turbo-kv` feature is not \
+                     compiled in — using LlamaNative instead. \
+                     Rebuild with --features turbo-kv once Qwen3.5 MoE support lands."
+                );
+                Box::new(LlamaNativeCache::new())
+            }
+        }
+    }
 }
