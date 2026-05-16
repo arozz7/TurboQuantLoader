@@ -396,21 +396,32 @@ fn do_generate(
             .context("failed to decode token to string")?;
 
         // Stop-string check.
-        if req.stop_strings.iter().any(|s| text.contains(s.as_str())) {
-            break;
+        let mut should_break = false;
+        let mut emit_text = text.clone();
+        for s in &req.stop_strings {
+            if let Some(idx) = text.find(s.as_str()) {
+                emit_text = text[..idx].to_string();
+                should_break = true;
+                break;
+            }
         }
 
         // Forward the token to the caller; abort if the receiver is gone.
         // blocking_send is correct here: this runs on a dedicated OS thread,
         // so blocking until the async consumer drains the channel is safe and
         // prevents the Done event from being lost when the GPU outpaces HTTP.
-        if event_tx.blocking_send(GenerateEvent::Token(text)).is_err() {
+        if !emit_text.is_empty() {
+            if event_tx.blocking_send(GenerateEvent::Token(emit_text)).is_err() {
+                break;
+            }
+        }
+
+        if should_break {
             break;
         }
 
         sampler.accept(token);
         tokens_generated += 1;
-        pos += 1;
 
         if tokens_generated % 20 == 0 {
             info!("actively generating: {} tokens elapsed...", tokens_generated);
@@ -422,6 +433,8 @@ fn do_generate(
             .add(token, pos, &[0], true)
             .context("failed to add generated token to batch")?;
         ctx.decode(&mut batch).context("per-token decode failed")?;
+        
+        pos += 1;
     }
 
     let elapsed = start.elapsed().as_secs_f32();
@@ -439,3 +452,4 @@ fn do_generate(
 
     Ok(())
 }
+

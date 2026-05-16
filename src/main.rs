@@ -2,6 +2,7 @@ mod config;
 mod gpu_stats;
 mod inference;
 mod kv_cache;
+mod metrics;
 mod model;
 mod server;
 mod tui;
@@ -95,7 +96,7 @@ struct BenchArgs {
 async fn main() -> Result<()> {
     // Disable llama.cpp CUDA Graphs globally to prevent WDDM VRAM fragmentation deadlocks
     // when executing deeply contextual batches on Windows.
-    std::env::set_var("GGML_CUDA_NO_GRAPHS", "1");
+    std::env::set_var("LLAMA_CUDA_NO_GRAPHS", "1");
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -446,3 +447,4 @@ fn format_size(bytes: u64) -> String {
         format!("{bytes} B")
     }
 }
+

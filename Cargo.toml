@@ -84,6 +84,9 @@ thiserror = "1"
 futures = "0.3"
 uuid    = { version = "1", features = ["v4"] }
 
+# HTTP client — used by proxy layer to forward requests to llama-server subprocess
+reqwest = { version = "0.12", features = ["stream", "json"] }
+
 # TUI — compiled only with `--features tui` (Phase 5B, desktop only)
 ratatui   = { version = "0.26", optional = true }
 crossterm = { version = "0.27", optional = true }

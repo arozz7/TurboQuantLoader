@@ -1,11 +1,11 @@
-//! Streaming token parser for Qwen3.5 special markup.
+﻿//! Streaming token parser for Qwen3.5 special markup.
 //!
 //! Qwen3.5 embeds structured markers directly in the token stream:
 //!
 //! | Marker | Meaning |
 //! |--------|---------|
-//! | `<think>` … `</think>` | Chain-of-thought block — map to Anthropic `thinking` content |
-//! | `<tool_call>` … `</tool_call>` | Function call JSON — map to Anthropic `tool_use` content |
+//! | `<think>` â€¦ `</think>` | Chain-of-thought block â€” map to Anthropic `thinking` content |
+//! | `<tool_call>` â€¦ `</tool_call>` | Function call JSON â€” map to Anthropic `tool_use` content |
 //!
 //! Tokens can straddle tag boundaries (e.g. a token that starts with `</` and
 //! the next token completes `think>`).  The parser maintains a small lookahead
@@ -16,11 +16,11 @@ const LOOKAHEAD: usize = 32;
 /// The parser state machine state.
 #[derive(Debug, Clone, PartialEq)]
 enum State {
-    /// Emitting plain text — between `</think>` and the next `<think>` or end.
+    /// Emitting plain text â€” between `</think>` and the next `<think>` or end.
     Text,
-    /// Inside `<think>…</think>` — emitting thinking tokens.
+    /// Inside `<think>â€¦</think>` â€” emitting thinking tokens.
     Thinking,
-    /// Inside `<tool_call>…</tool_call>` — buffering JSON.
+    /// Inside `<tool_call>â€¦</tool_call>` â€” buffering JSON.
     ToolCall { buffer: String },
 }
 
@@ -31,7 +31,7 @@ pub enum ParsedEvent {
     TextToken(String),
     /// A thinking token to emit as a `thinking_delta` content block event.
     ThinkingToken(String),
-    /// `</think>` was detected — close the thinking block, open the text block.
+    /// `</think>` was detected â€” close the thinking block, open the text block.
     ThinkingEnd,
     /// A complete `<tool_call>` JSON object is ready.
     ToolCallReady { name: String, arguments: serde_json::Value },
@@ -80,7 +80,7 @@ impl StreamParser {
         match &mut self.state {
             State::Thinking => events.push(ParsedEvent::ThinkingToken(text)),
             State::ToolCall { buffer } => {
-                // Incomplete tool call — best-effort: try to parse what we have.
+                // Incomplete tool call â€” best-effort: try to parse what we have.
                 buffer.push_str(&text);
                 if let Some(evt) = try_parse_tool_call(buffer) {
                     events.push(evt);
@@ -95,7 +95,7 @@ impl StreamParser {
         events
     }
 
-    // ── Internal processing ───────────────────────────────────────────────────
+    // â”€â”€ Internal processing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn process(&mut self, events: &mut Vec<ParsedEvent>) {
         loop {
@@ -147,7 +147,7 @@ impl StreamParser {
                         events.push(ParsedEvent::ThinkingEnd);
                         // Continue processing remainder in Text state.
                     } else {
-                        // No closing tag yet — keep LOOKAHEAD buffered, emit the rest.
+                        // No closing tag yet â€” keep LOOKAHEAD buffered, emit the rest.
                         let safe_len = self.lookahead.len().saturating_sub(LOOKAHEAD);
                         if safe_len > 0 {
                             let split = floor_char_boundary(&self.lookahead, safe_len);
@@ -205,34 +205,87 @@ impl Default for StreamParser {
     }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Try to parse a tool call JSON buffer into a [`ParsedEvent::ToolCallReady`].
 fn try_parse_tool_call(buf: &str) -> Option<ParsedEvent> {
     let trimmed = buf.trim();
-    let v: serde_json::Value = serde_json::from_str(trimmed).ok()?;
-    let name = v.get("name")?.as_str()?.to_string();
     
-    // Safely extract `arguments`
-    let mut arguments = v.get("arguments").cloned().unwrap_or(serde_json::Value::Object(
-        serde_json::Map::new(),
-    ));
-
-    // Handle stringified arguments (OpenAI format produced by some models)
-    if let Some(s) = arguments.as_str() {
-        if let Ok(parsed) = serde_json::from_str(s) {
-            arguments = parsed;
-        } else {
-            tracing::warn!(raw_args = %s, "failed to un-stringify tool arguments; passing as raw string");
+    // First try standard JSON
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
+            let mut arguments = v.get("arguments").or_else(|| v.get("parameters")).or_else(|| v.get("input")).cloned().unwrap_or_else(|| serde_json::json!({}));
+            if let Some(s) = arguments.as_str() {
+                if let Ok(p) = serde_json::from_str(s) { arguments = p; }
+            }
+            tracing::info!(tool_call_name = %name, args = %arguments, "Successfully parsed model tool call output");
+            return Some(ParsedEvent::ToolCallReady { name: name.to_string(), arguments });
         }
     }
-
-    tracing::info!(tool_call_name = %name, args = %arguments, "Successfully parsed model tool call output");
-
+    
+    // Fallback: Model hallucinated XML tags (e.g. <function_name>Write</function_name> or <Write>) OR produced invalid JSON structure
+    let mut ext_name = None;
+    
+    // Try to extract name from `"name": "bash"` directly
+    if let Some(n_start) = buf.find(r#""name""#) {
+        let rest = &buf[n_start + 6..];
+        if let Some(quote1) = rest.find('"') {
+            if let Some(quote2) = rest[quote1 + 1..].find('"') {
+                ext_name = Some(rest[quote1 + 1..quote1 + 1 + quote2].to_string());
+            }
+        }
+    }
+    
+    if ext_name.is_none() {
+        if let Some(start) = buf.find("<function_name>") {
+            if let Some(end) = buf[start..].find("</function_name>") {
+                ext_name = Some(buf[start + 15..start + end].trim().to_string());
+            }
+        } else if let Some(start) = buf.find('<') {
+            if let Some(end) = buf[start..].find('>') {
+                let tag = buf[start + 1..start + end].trim();
+                if !tag.contains('/') && !tag.contains(' ') {
+                    ext_name = Some(tag.to_string());
+                }
+            }
+        }
+    }
+    
+    let name = ext_name?;
+    
+    // Fallback extract JSON arguments object embedded anywhere inside the invalid object
+    let mut arguments = serde_json::json!({});
+    let mut search_idx = 0;
+    while let Some(start) = buf[search_idx..].find('{') {
+        let abs_start = search_idx + start;
+        if let Some(end) = buf.rfind('}') {
+            if end >= abs_start {
+                let json_slice = &buf[abs_start..=end];
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_slice) {
+                    if let Some(obj) = parsed.as_object() {
+                        if obj.contains_key("arguments") {
+                            arguments = obj["arguments"].clone();
+                            break;
+                        } else if obj.contains_key("name") && obj.len() <= 2 && !obj.contains_key("command") {
+                            // Probably parsed the outer shell successfully but it didn't contain anything useful
+                            // Just continue searching inner brackets!
+                        } else {
+                            // Direct arguments embedded (e.g., {"command": "..."})
+                            arguments = parsed;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        search_idx = abs_start + 1;
+    }
+    
+    tracing::info!(tool_call_name = %name, args = %arguments, "Successfully extracted fallback model tool call output");
     Some(ParsedEvent::ToolCallReady { name, arguments })
 }
 
-/// Find the largest byte index ≤ `index` that falls on a UTF-8 char boundary.
+/// Find the largest byte index â‰¤ `index` that falls on a UTF-8 char boundary.
 fn floor_char_boundary(s: &str, index: usize) -> usize {
     if index >= s.len() {
         return s.len();
@@ -244,7 +297,7 @@ fn floor_char_boundary(s: &str, index: usize) -> usize {
     i
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+// â”€â”€ Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[cfg(test)]
 mod tests {
@@ -329,3 +382,4 @@ mod tests {
         assert!(!evts.iter().any(|e| *e == ParsedEvent::ThinkingEnd));
     }
 }
+

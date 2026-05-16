@@ -12,7 +12,15 @@ use crate::server::error::ApiError;
 
 /// `GET /v1/models`
 pub async fn list_models(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let name = state.engine.model_name().to_string();
+    let cfg = state.config_snapshot().await;
+    let name = cfg
+        .model
+        .model_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("local-model")
+        .to_string();
+
     Ok(Json(json!({
         "object": "list",
         "data": [{

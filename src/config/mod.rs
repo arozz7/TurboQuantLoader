@@ -1,7 +1,9 @@
+mod backend;
 mod kv_cache;
 mod model;
 mod server;
 
+pub use backend::{BackendConfig, BackendVariant};
 pub use kv_cache::{KvBits, KvCacheConfig, KvStrategy};
 pub use model::ModelConfig;
 pub use server::ServerConfig;
@@ -26,6 +28,9 @@ pub struct AppConfig {
     /// KV cache compression settings.
     #[serde(default)]
     pub kv_cache: KvCacheConfig,
+    /// llama-server subprocess backend settings.
+    #[serde(default)]
+    pub backend: BackendConfig,
 }
 
 impl Default for AppConfig {
@@ -34,6 +39,7 @@ impl Default for AppConfig {
             server: ServerConfig::default(),
             model: ModelConfig::default(),
             kv_cache: KvCacheConfig::default(),
+            backend: BackendConfig::default(),
         }
     }
 }

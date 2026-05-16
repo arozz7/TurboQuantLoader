@@ -159,6 +159,7 @@ pub struct MessagesResponse {
     pub content: Vec<TextBlock>,
     pub model: String,
     pub stop_reason: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_sequence: Option<String>,
     pub usage: InputUsage,
 }
@@ -224,7 +225,9 @@ pub struct MessageStartData {
     pub role: &'static str,
     pub content: Vec<serde_json::Value>,
     pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_sequence: Option<String>,
     pub usage: InputUsage,
 }
@@ -271,6 +274,7 @@ pub struct MessageDeltaEvent {
 #[derive(Debug, Serialize)]
 pub struct MessageDeltaData {
     pub stop_reason: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_sequence: Option<String>,
 }
 

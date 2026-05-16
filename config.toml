@@ -7,40 +7,52 @@ port                    = 7432
 max_concurrent_requests = 4
 request_timeout_secs    = 300
 
+[backend]
+# variant: "llama_server" (Vulkan build — primary) | "turbo_quant" (CUDA fork, NVIDIA only)
+variant              = "llama_server"
+binary_path          = "J:/llama/llama-server.exe"
+# Internal port: llama-server listens here; TurboQuantLoader proxies 7432 → 7433
+internal_port        = 7433
+startup_timeout_secs = 180
+restart_on_crash     = true
+# Extra CLI flags appended verbatim. Flash-attn and MTP speculative decoding for Qwen3.6.
+extra_flags          = ["--flash-attn", "--spec-type", "draft-mtp", "--spec-draft-n-max", "2"]
+
 [model]
 # ── Path configuration (platform-specific — override in config.local.toml) ───
-# Windows example (current dev machine):
-model_path   = "J:/llama/Models/unsloth/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-UD-IQ3_XXS.gguf"
+# Current dev machine (Windows):
+model_path   = "J:/llama/Models/unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q6_K.gguf"
 # macOS example:   model_path = "/Users/you/llama/Models/..."
 # Linux example:   model_path = "/home/you/llama/Models/..."
 # Env override:    TQL_MODEL_PATH=/path/to/model.gguf
 #
-# mmproj_path = "J:/llama/Models/unsloth/Qwen3.5-35B-A3B-GGUF/mmproj-F32.gguf"  # Phase 5 vision
+# mmproj_path = "J:/llama/Models/unsloth/Qwen3.6-27B-MTP-GGUF/mmproj-F32.gguf"  # vision
 
 models_dir   = "J:/llama/Models"   # root dir for `list` command; override per-platform
 
 # ── GPU configuration ─────────────────────────────────────────────────────────
-# n_gpu_layers: number of layers to offload to GPU (-1 = all layers)
-# Set to 0 for CPU-only inference on any platform.
-n_gpu_layers = 39
+# n_gpu_layers: -1 = offload all layers to GPU
+n_gpu_layers = -1
 
-# tensor_split: proportional VRAM weights per GPU device (CUDA/Metal/Vulkan multi-GPU)
-# Windows dev machine: RTX 4070 Ti Super (16 GB) + RTX 2060 (6 GB)
-# Single GPU or CPU-only: tensor_split = [1.0]
-# macOS Apple Silicon (unified memory): tensor_split = [1.0]
-tensor_split = [1.0]
+# main_gpu: index of the primary GPU device for llama-server --main-gpu
+# Device [1] = Intel Arc Pro B70 (32 GB VRAM, Vulkan) — primary inference target
+# Device [0] = NVIDIA RTX 4070 Ti Super (16 GB, CUDA+Vulkan) — overflow
+main_gpu = 1
 
-context_size = 40960             # tokens; increase to 32768+ once stable
+# tensor_split: proportional VRAM weights for --tensor-split (RTX 4070 Ti Super, Arc B70)
+# Qwen3.6-27B Q6_K (~22 GB) fits entirely on Arc B70 alone.
+# For 262k context KV overflow, the RTX 4070 Ti Super absorbs excess.
+tensor_split = [16.0, 32.0]
+
+# context_size: max supported by Qwen3.6 model
+context_size = 262144
 batch_size   = 512
-threads      = 8                # CPU threads for non-GPU ops; tune to your core count
+threads      = 8    # CPU threads for non-GPU ops; tune to your core count
 
 [kv_cache]
 # bits: 2 | 3 | 4 | 8
 # 4-bit (Q4_0) = ~3.9x compression, near-zero quality loss — recommended default
-# 3-bit        = closest to true TurboQuant target; maps to Q4_0 until tq-kv supports Qwen3.5 MoE
-# 8-bit (Q8_0) = conservative option, ~2x compression
 bits             = 4
 # strategy: "llama_native" | "turbo_quant"
-# "turbo_quant" requires building with --features turbo-kv
 strategy         = "llama_native"
 # memory_budget_mb = 4096   # optional cap; omit for unlimited

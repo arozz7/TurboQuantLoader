@@ -1,21 +1,24 @@
 //! POST /v1/chat/completions — OpenAI Chat Completions API.
+//!
+//! Translates the incoming request (tool injection into system prompt for Qwen3),
+//! proxies to llama-server, and streams/collects the response.
 
 use std::convert::Infallible;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use axum::Json;
-use tokio_stream::StreamExt as _;
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use crate::inference::engine::{ChatMessage, ChatRequest};
-use crate::model::backend::{GenerateEvent, SamplerParams};
+use crate::model::backend::GenerateEvent;
 use crate::server::error::ApiError;
+use crate::server::proxy::{build_chat_body, proxy_request, spawn_tracked_reader};
 use crate::server::sse::{data_event, sse_response};
+use crate::server::stream_parser::{ParsedEvent, StreamParser};
 use crate::server::types::openai::{
-    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, Choice, DeltaMessage,
-    ResponseMessage, StreamChoice, Usage,
+    ChatCompletionChunk, ChatCompletionRequest, DeltaMessage, StreamChoice, ToolCallFunction,
+    ToolCallInfo,
 };
 use crate::server::AppState;
 
@@ -24,126 +27,221 @@ pub async fn chat_completions(
     State(state): State<AppState>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<Response, ApiError> {
-    let chat_req = to_chat_request(&req);
+    let proc = state.process_snapshot().await;
+    let cfg = state.config_snapshot().await;
+    let model_name = model_name_from_config(&cfg);
+
+    let messages = prepare_messages(&req);
+    let url = format!("{}/v1/chat/completions", proc.base_url());
+    let temperature = req.temperature.unwrap_or(0.6);
+    let top_p = req.top_p.unwrap_or(0.95);
+    let top_k = req.top_k.unwrap_or(20);
 
     if req.stream {
-        let stream = tokio::task::block_in_place(|| state.engine.chat(chat_req))?;
-        Ok(streaming_response(stream.into_inner(), state.engine.model_name().to_string()))
+        let body = build_chat_body(&messages, true, req.max_tokens, temperature, top_p, top_k);
+        let rx = spawn_tracked_reader(
+            proc.http_client(),
+            &url,
+            body,
+            state.metrics.clone(),
+        )
+        .await?;
+        Ok(streaming_response(rx, model_name))
     } else {
-        let stream = tokio::task::block_in_place(|| state.engine.chat(chat_req))?;
-        let (text, summary) = stream
-            .collect_full()
+        let body = build_chat_body(&messages, false, req.max_tokens, temperature, top_p, top_k);
+        // Non-streaming: transparent proxy — llama-server returns OpenAI JSON directly.
+        proxy_request(proc.http_client(), &proc.base_url(), "/v1/chat/completions", body, None)
             .await
-            .map_err(|e| anyhow::anyhow!(e))?;
-        Ok(full_response(text, summary.context_tokens, summary.tokens_generated, state.engine.model_name()))
     }
 }
 
-// ── Request translation ───────────────────────────────────────────────────────
+// ── Message preparation ───────────────────────────────────────────────────────
 
-fn to_chat_request(req: &ChatCompletionRequest) -> ChatRequest {
-    let messages = req
+fn prepare_messages(req: &ChatCompletionRequest) -> Vec<(&'static str, String)> {
+    let mut messages: Vec<(String, String)> = req
         .messages
         .iter()
-        .map(|m| ChatMessage {
-            role: m.role.clone(),
-            content: m.content.clone().into_text(),
-        })
+        .map(|m| (m.role.clone(), m.content.clone().into_text()))
         .collect();
 
-    ChatRequest {
-        messages,
-        max_tokens: req.max_tokens,
-        sampler: SamplerParams {
-            temperature: req.temperature.unwrap_or(0.7),
-            top_p: req.top_p.unwrap_or(0.9),
-            top_k: req.top_k.unwrap_or(40),
-            seed: req.seed,
-            ..SamplerParams::default()
-        },
+    if let Some(tools) = &req.tools {
+        if !tools.is_empty() {
+            let tools_json = serde_json::to_string_pretty(tools).unwrap_or_default();
+            let injection = format!(
+                "\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\n\
+                 You are provided with function signatures within <tools></tools> XML tags:\n<tools>\n\
+                 {tools_json}\n</tools>\n\n\
+                 For each function call, you MUST return a json object with function name and arguments \
+                 within <tool_call></tool_call> XML tags.\n\
+                 Format:\n<tool_call>\n{{\"name\": \"tool_name_here\", \"arguments\": {{\"arg_1\": \"value_1\"}}}}\n</tool_call>"
+            );
+            if let Some(sys) = messages.iter_mut().find(|(r, _)| r == "system") {
+                sys.1.push_str(&injection);
+            } else {
+                messages.insert(
+                    0,
+                    ("system".into(), format!("You are a helpful assistant.{injection}")),
+                );
+            }
+        }
     }
-}
 
-// ── Non-streaming response ────────────────────────────────────────────────────
-
-fn full_response(text: String, context_tokens: u32, output_tokens: u32, model: &str) -> Response {
-    let prompt_tokens = context_tokens.saturating_sub(output_tokens);
-    let resp = ChatCompletionResponse {
-        id: new_id("chatcmpl"),
-        object: "chat.completion",
-        created: unix_now(),
-        model: model.to_string(),
-        choices: vec![Choice {
-            index: 0,
-            message: ResponseMessage { role: "assistant", content: text },
-            finish_reason: "stop",
-        }],
-        usage: Usage {
-            prompt_tokens,
-            completion_tokens: output_tokens,
-            total_tokens: context_tokens,
-        },
-    };
-    Json(resp).into_response()
+    messages
+        .into_iter()
+        .map(|(role, content)| {
+            let r: &'static str = match role.as_str() {
+                "system" => "system",
+                "assistant" => "assistant",
+                "tool" => "tool",
+                _ => "user",
+            };
+            (r, content)
+        })
+        .collect()
 }
 
 // ── Streaming response ────────────────────────────────────────────────────────
 
-fn streaming_response(
-    rx: crate::model::backend::GenerateStream,
-    model: String,
-) -> Response {
+fn streaming_response(mut rx: crate::model::backend::GenerateStream, model: String) -> Response {
     let id = new_id("chatcmpl");
     let created = unix_now();
+    let model_clone = model.clone();
 
-    // First chunk announces the assistant role.
+    let (tx, sse_rx) = tokio::sync::mpsc::unbounded_channel();
+
     let first = data_event(&ChatCompletionChunk {
         id: id.clone(),
         object: "chat.completion.chunk",
         created,
-        model: model.clone(),
+        model: model_clone.clone(),
         choices: vec![StreamChoice {
             index: 0,
-            delta: DeltaMessage { role: Some("assistant"), content: Some(String::new()) },
+            delta: DeltaMessage {
+                role: Some("assistant"),
+                content: Some(String::new()),
+                tool_calls: None,
+            },
             finish_reason: None,
         }],
     });
+    let _ = tx.send(Ok::<_, Infallible>(first));
 
-    let token_stream = ReceiverStream::new(rx).filter_map(move |event| match event {
-        GenerateEvent::Token(text) => Some(Ok::<_, Infallible>(data_event(&ChatCompletionChunk {
-            id: id.clone(),
-            object: "chat.completion.chunk",
-            created,
-            model: model.clone(),
-            choices: vec![StreamChoice {
-                index: 0,
-                delta: DeltaMessage { role: None, content: Some(text) },
-                finish_reason: None,
-            }],
-        }))),
-        GenerateEvent::Done(_) => {
-            // [DONE] sentinel expected by OpenAI clients.
-            Some(Ok(axum::response::sse::Event::default().data("[DONE]")))
-        }
-        GenerateEvent::Error(e) => {
-            tracing::warn!(error = %e, "generation error during OpenAI stream");
-            None
+    tokio::spawn(async move {
+        let mut parser = StreamParser::new();
+        let mut tool_called = false;
+
+        let emit_events = |events: Vec<ParsedEvent>,
+                           tx: &tokio::sync::mpsc::UnboundedSender<_>| {
+            for evt in events {
+                match evt {
+                    ParsedEvent::TextToken(text) | ParsedEvent::ThinkingToken(text) => {
+                        let _ = tx.send(Ok::<_, Infallible>(data_event(&ChatCompletionChunk {
+                            id: id.clone(),
+                            object: "chat.completion.chunk",
+                            created,
+                            model: model_clone.clone(),
+                            choices: vec![StreamChoice {
+                                index: 0,
+                                delta: DeltaMessage {
+                                    role: None,
+                                    content: Some(text),
+                                    tool_calls: None,
+                                },
+                                finish_reason: None,
+                            }],
+                        })));
+                    }
+                    ParsedEvent::ThinkingEnd => {}
+                    ParsedEvent::ToolCallReady { name, arguments } => {
+                        let _ = tx.send(Ok::<_, Infallible>(data_event(&ChatCompletionChunk {
+                            id: id.clone(),
+                            object: "chat.completion.chunk",
+                            created,
+                            model: model_clone.clone(),
+                            choices: vec![StreamChoice {
+                                index: 0,
+                                delta: DeltaMessage {
+                                    role: None,
+                                    content: None,
+                                    tool_calls: Some(vec![ToolCallInfo {
+                                        index: 0,
+                                        id: Some(new_id("call")),
+                                        r#type: Some("function"),
+                                        function: ToolCallFunction {
+                                            name: Some(name),
+                                            arguments: Some(
+                                                serde_json::to_string(&arguments)
+                                                    .unwrap_or_else(|_| "{}".to_string()),
+                                            ),
+                                        },
+                                    }]),
+                                },
+                                finish_reason: None,
+                            }],
+                        })));
+                    }
+                }
+            }
+        };
+
+        while let Some(event) = rx.recv().await {
+            match event {
+                GenerateEvent::Token(text) => {
+                    let evts = parser.push(&text);
+                    if evts.iter().any(|e| matches!(e, ParsedEvent::ToolCallReady { .. })) {
+                        tool_called = true;
+                    }
+                    emit_events(evts, &tx);
+                }
+                GenerateEvent::Done(_) => {
+                    let evts = parser.flush();
+                    if evts.iter().any(|e| matches!(e, ParsedEvent::ToolCallReady { .. })) {
+                        tool_called = true;
+                    }
+                    emit_events(evts, &tx);
+
+                    let finish_reason = if tool_called { "tool_calls" } else { "stop" };
+                    let _ = tx.send(Ok::<_, Infallible>(data_event(&ChatCompletionChunk {
+                        id: id.clone(),
+                        object: "chat.completion.chunk",
+                        created,
+                        model: model_clone.clone(),
+                        choices: vec![StreamChoice {
+                            index: 0,
+                            delta: DeltaMessage { role: None, content: None, tool_calls: None },
+                            finish_reason: Some(finish_reason),
+                        }],
+                    })));
+                    let _ = tx.send(Ok::<_, Infallible>(
+                        axum::response::sse::Event::default().data("[DONE]"),
+                    ));
+                    break;
+                }
+                GenerateEvent::Error(e) => {
+                    tracing::warn!(error = %e, "generation error during OpenAI stream");
+                    break;
+                }
+            }
         }
     });
 
-    let full_stream =
-        tokio_stream::iter([Ok::<_, Infallible>(first)]).chain(token_stream);
-
-    sse_response(full_stream)
+    sse_response(UnboundedReceiverStream::new(sse_rx))
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+fn model_name_from_config(config: &crate::config::AppConfig) -> String {
+    config
+        .model
+        .model_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("local-model")
+        .to_string()
+}
+
 fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 fn new_id(prefix: &str) -> String {

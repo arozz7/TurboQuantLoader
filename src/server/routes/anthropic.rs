@@ -27,12 +27,11 @@ use axum::Json;
 use futures::StreamExt as _;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::inference::engine::{ChatMessage, ChatRequest};
-use crate::model::backend::{GenerateEvent, GenerateStream, SamplerParams};
+use crate::model::backend::GenerateEvent;
 use crate::server::error::ApiError;
+use crate::server::proxy::{build_chat_body, spawn_tracked_reader};
 use crate::server::sse::{
-    input_json_delta_event, named_event, sse_response, thinking_block_start_event,
-    thinking_delta_event, tool_use_block_start_event,
+    input_json_delta_event, named_event, sse_response, tool_use_block_start_event,
 };
 use crate::server::stream_parser::{ParsedEvent, StreamParser};
 use crate::server::types::anthropic::{
@@ -50,8 +49,6 @@ pub async fn create_message(
 ) -> Result<Response, ApiError> {
     let msg_count = req.messages.len();
     let has_tools = req.tools.is_some();
-    // Claude Code requests up to 32 000 tokens but actual responses are short.
-    // Cap here to prevent runaway generation; raise once tool use is implemented.
     let max_tokens = req.max_tokens.min(4096);
     tracing::info!(
         stream = req.stream,
@@ -62,35 +59,65 @@ pub async fn create_message(
         "POST /v1/messages"
     );
 
-    let chat_req = to_chat_request(&req, max_tokens);
+    let proc = state.process_snapshot().await;
+    let cfg = state.config_snapshot().await;
+
+    let model_name = cfg
+        .model
+        .model_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("local-model")
+        .to_string();
+
+    let messages = to_openai_messages(&req);
+    let temperature = req.temperature.unwrap_or(0.6);
+    let top_p = req.top_p.unwrap_or(0.95);
+    let top_k = req.top_k.unwrap_or(20);
+    let base_url = proc.base_url();
+    let http = proc.http_client().clone();
 
     if req.stream {
-        let stream = tokio::task::block_in_place(|| state.engine.chat(chat_req))?;
-        Ok(streaming_response(stream.into_inner(), state.engine.model_name().to_string()))
+        let url = format!("{base_url}/v1/chat/completions");
+        let body = build_chat_body(&messages, true, max_tokens, temperature, top_p, top_k);
+        let rx = spawn_tracked_reader(&http, &url, body, state.metrics.clone()).await?;
+        Ok(streaming_response(rx, model_name))
     } else {
-        let stream = tokio::task::block_in_place(|| state.engine.chat(chat_req))?;
-        let (text, summary) =
-            stream.collect_full().await.map_err(|e| anyhow::anyhow!(e))?;
-        tracing::info!(
-            tokens = summary.tokens_generated,
-            tps = summary.tokens_per_second,
-            "non-streaming response complete"
-        );
-        Ok(full_response(
-            text,
-            summary.context_tokens,
-            summary.tokens_generated,
-            state.engine.model_name(),
-        ))
+        let url = format!("{base_url}/v1/chat/completions");
+        let body = build_chat_body(&messages, false, max_tokens, temperature, top_p, top_k);
+
+        let upstream = http
+            .post(&url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| ApiError::from(anyhow::anyhow!("upstream request failed: {e}")))?;
+
+        let json: serde_json::Value = upstream
+            .json()
+            .await
+            .map_err(|e| ApiError::from(anyhow::anyhow!("failed to parse upstream response: {e}")))?;
+
+        let text = json["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        let prompt_tokens = json["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32;
+        let completion_tokens = json["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32;
+
+        tracing::info!(tokens = completion_tokens, "non-streaming response complete");
+
+        Ok(full_response(text, prompt_tokens, completion_tokens, &model_name))
     }
 }
 
 // ── Request translation ───────────────────────────────────────────────────────
 
-fn to_chat_request(req: &MessagesRequest, max_tokens: u32) -> ChatRequest {
-    let mut messages: Vec<ChatMessage> = Vec::new();
-
-    // Build the system message, appending a <tools> block when tools are present.
+/// Convert an Anthropic `MessagesRequest` to a list of `(role, content)` pairs
+/// suitable for [`build_chat_body`], including Qwen3 tool injection in the
+/// system prompt.
+fn to_openai_messages(req: &MessagesRequest) -> Vec<(&'static str, String)> {
     let system_text = req.system.clone().map(|s| s.into_text()).unwrap_or_default();
     let system_content = if let Some(tools) = &req.tools {
         if tools.is_empty() {
@@ -99,48 +126,44 @@ fn to_chat_request(req: &MessagesRequest, max_tokens: u32) -> ChatRequest {
             let tools_json = tools_to_qwen3_json(tools);
             format!(
                 "{system_text}\n\n# Tools\n\nYou may call one or more functions to assist with \
-                 the user query.\n\n<tools>\n{tools_json}\n</tools>"
+                 the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{tools_json}\n</tools>\n\n\
+                 For each function call, you MUST return a json object with function name and arguments within <tool_call></tool_call> XML tags.\n\
+                 Format:\n<tool_call>\n{{\"name\": \"tool_name_here\", \"arguments\": {{\"arg_1\": \"value_1\"}}}}\n</tool_call>"
             )
         }
     } else {
         system_text
     };
 
+    let mut out: Vec<(&'static str, String)> = Vec::new();
+
     if !system_content.is_empty() {
-        messages.push(ChatMessage { role: "system".into(), content: system_content });
+        out.push(("system", system_content));
     }
 
     for m in &req.messages {
-        messages.push(ChatMessage {
-            role: m.role.clone(),
-            content: m.content.clone().into_qwen3_text(),
-        });
+        let role: &'static str = match m.role.as_str() {
+            "assistant" => "assistant",
+            "tool" => "tool",
+            _ => "user",
+        };
+        out.push((role, m.content.clone().into_qwen3_text()));
     }
 
-    ChatRequest {
-        messages,
-        max_tokens,
-        sampler: SamplerParams {
-            temperature: req.temperature.unwrap_or(0.7),
-            top_p: req.top_p.unwrap_or(0.9),
-            top_k: req.top_k.unwrap_or(40),
-            ..SamplerParams::default()
-        },
-    }
+    out
 }
 
-/// Convert an Anthropic tools array into the JSON string Qwen3.5 expects inside
+/// Convert Anthropic tools array to the JSON string Qwen3 expects inside
 /// `<tools>…</tools>`.
 ///
 /// Anthropic format: `{ name, description, input_schema: { type, properties, required } }`
-/// Qwen3.5 format:   `[{ "type": "function", "function": { name, description, parameters } }]`
+/// Qwen3 format:   `[{ "type": "function", "function": { name, description, parameters } }]`
 fn tools_to_qwen3_json(tools: &[serde_json::Value]) -> String {
     let converted: Vec<serde_json::Value> = tools
         .iter()
         .map(|t| {
             let name = t.get("name").cloned().unwrap_or(serde_json::Value::Null);
             let description = t.get("description").cloned().unwrap_or(serde_json::Value::Null);
-            // Anthropic calls the schema "input_schema"; Qwen3.5 expects "parameters".
             let parameters = t
                 .get("input_schema")
                 .cloned()
@@ -162,11 +185,10 @@ fn tools_to_qwen3_json(tools: &[serde_json::Value]) -> String {
 
 fn full_response(
     text: String,
-    context_tokens: u32,
+    prompt_tokens: u32,
     output_tokens: u32,
     model: &str,
 ) -> Response {
-    let prompt_tokens = context_tokens.saturating_sub(output_tokens);
     let resp = MessagesResponse {
         id: new_id("msg"),
         r#type: "message",
@@ -182,17 +204,12 @@ fn full_response(
 
 // ── Streaming response ────────────────────────────────────────────────────────
 
-/// Build a streaming SSE [`Response`] that routes model tokens through the
-/// [`StreamParser`], emitting Anthropic thinking and tool_use content blocks
-/// as well as plain text deltas.
-fn streaming_response(rx: GenerateStream, model: String) -> Response {
+fn streaming_response(rx: crate::model::backend::GenerateStream, model: String) -> Response {
     let msg_id = new_id("msg");
     let (tx, output_rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(256);
 
     tokio::spawn(async move {
         // ── Preamble ──────────────────────────────────────────────────────────
-        // content_block_start is deferred — we don't know yet whether the first
-        // block will be thinking or text.
         let ok = tx
             .send(Ok(named_event(
                 "message_start",
@@ -221,7 +238,6 @@ fn streaming_response(rx: GenerateStream, model: String) -> Response {
         // ── Token processing ──────────────────────────────────────────────────
         let mut parser = StreamParser::new();
         let mut block_index: u32 = 0;
-        let mut thinking_open = false;
         let mut text_open = false;
         let mut tool_called = false;
 
@@ -234,7 +250,6 @@ fn streaming_response(rx: GenerateStream, model: String) -> Response {
                         &tx,
                         events,
                         &mut block_index,
-                        &mut thinking_open,
                         &mut text_open,
                         &mut tool_called,
                     )
@@ -245,20 +260,17 @@ fn streaming_response(rx: GenerateStream, model: String) -> Response {
                     }
                 }
                 GenerateEvent::Done(summary) => {
-                    // Flush any buffered partial tag content.
                     let events = parser.flush();
                     let _ = emit_parsed(
                         &tx,
                         events,
                         &mut block_index,
-                        &mut thinking_open,
                         &mut text_open,
                         &mut tool_called,
                     )
                     .await;
 
-                    // Close any open content block.
-                    if thinking_open || text_open {
+                    if text_open {
                         let _ = tx
                             .send(Ok(named_event(
                                 "content_block_stop",
@@ -270,9 +282,6 @@ fn streaming_response(rx: GenerateStream, model: String) -> Response {
                             .await;
                     }
 
-                    // Final events.
-                    // Use stop_reason "tool_use" when the model invoked a tool so that
-                    // Claude Code knows to run the tool and send a follow-up request.
                     let stop_reason = if tool_called { "tool_use" } else { "end_turn" };
                     let _ = tx
                         .send(Ok(named_event(
@@ -310,21 +319,17 @@ fn streaming_response(rx: GenerateStream, model: String) -> Response {
 
 // ── Parsed-event → SSE dispatch ───────────────────────────────────────────────
 
-/// Translate a batch of [`ParsedEvent`]s into SSE events and send them.
-///
-/// Returns `Err(())` if the receiver has been dropped (client disconnected).
 async fn emit_parsed(
     tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
     events: Vec<ParsedEvent>,
     block_index: &mut u32,
-    thinking_open: &mut bool,
     text_open: &mut bool,
     tool_called: &mut bool,
 ) -> Result<(), ()> {
     for parsed in events {
         match parsed {
             ParsedEvent::ThinkingToken(t) => {
-                // Emit thinking tokens as standard text blocks to prevent Claude SDK crashing
+                // Emit thinking tokens as standard text blocks to prevent SDK crashes.
                 if !*text_open {
                     tx.send(Ok(named_event(
                         "content_block_start",
@@ -351,8 +356,7 @@ async fn emit_parsed(
             }
 
             ParsedEvent::ThinkingEnd => {
-                // Do not close the block. The model continues emitting text smoothly
-                // into the same text block right after thinking!
+                // Model continues into text block immediately after thinking.
             }
 
             ParsedEvent::TextToken(t) => {
@@ -382,7 +386,6 @@ async fn emit_parsed(
             }
 
             ParsedEvent::ToolCallReady { name, arguments } => {
-                // Close any open text block before the tool_use block.
                 if *text_open {
                     tx.send(Ok(named_event(
                         "content_block_stop",
@@ -419,7 +422,6 @@ async fn emit_parsed(
 
                 *block_index += 1;
                 *tool_called = true;
-                // text_open stays false — model continues after tool call
             }
         }
     }
@@ -429,6 +431,5 @@ async fn emit_parsed(
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn new_id(prefix: &str) -> String {
-    // Anthropic strict API format requires underscores (e.g. toolu_01A09q...)
     format!("{}_{}", prefix, uuid::Uuid::new_v4().simple())
 }

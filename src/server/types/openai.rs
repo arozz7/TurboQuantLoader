@@ -58,6 +58,7 @@ pub struct ChatCompletionRequest {
     pub top_p: Option<f32>,
     pub top_k: Option<u32>,
     pub seed: Option<u64>,
+    pub tools: Option<Vec<serde_json::Value>>,
 }
 
 fn default_max_tokens() -> u32 {
@@ -99,11 +100,31 @@ pub struct ChatCompletionResponse {
 // ── Streaming chunk ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
+pub struct ToolCallFunction {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ToolCallInfo {
+    pub index: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<&'static str>,
+    pub function: ToolCallFunction,
+}
+
+#[derive(Debug, Serialize)]
 pub struct DeltaMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCallInfo>>,
 }
 
 #[derive(Debug, Serialize)]
