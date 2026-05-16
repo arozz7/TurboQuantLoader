@@ -232,7 +232,7 @@ Add to `coding-agent/config/models.yaml`:
 ```yaml
 - name: Qwen3.6-27B-Q6_K
   type: local
-  provider: lmstudio        # reuses the existing OllamaClient (/v1/chat/completions)
+  provider: turboquant      # non-lmstudio: skips LM Studio load/unload API; OllamaClient still hits /v1/chat/completions
   endpoint: ${TURBOQUANT_URL:-http://127.0.0.1:7432}
   context_window: 262144
   is_coding_optimized: true
@@ -245,11 +245,10 @@ Add to `coding-agent/.env`:
 TURBOQUANT_URL=http://127.0.0.1:7432
 ```
 
-**Important:** Set `single_model_only: false` in the `local_runtime` section (or
-move this model above other local models in the yaml so it becomes the default).
-TurboQuantLoader manages its own model lifecycle — it does not implement the LM Studio
-load/unload API. The `single_model_only` flag triggers LM Studio-specific endpoints
-that TurboQuantLoader does not serve.
+**Important:** `single_model_only: false` must be set in `local_runtime` (already done
+in the example above). TurboQuantLoader manages its own model lifecycle — it does not
+implement LM Studio's load/unload API. Using `provider: turboquant` (any non-`lmstudio`
+value) ensures the router skips those LM Studio-specific endpoints automatically.
 
 To make TurboQuantLoader the default coding model:
 ```yaml
