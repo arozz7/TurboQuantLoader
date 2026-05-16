@@ -1,4 +1,4 @@
-# TurboQuantLoader — Windows launch script.
+# TurboQuantLoader - Windows launch script.
 #
 # Phase 6+: TurboQuantLoader is now a process manager + API proxy.
 # It spawns llama-server as a subprocess (Vulkan build for Intel Arc B70).
@@ -11,7 +11,7 @@
 # Prevent WDDM VRAM fragmentation on NVIDIA when llama-server uses CUDA internally.
 $env:LLAMA_CUDA_NO_GRAPHS = "1"
 
-Write-Host "Starting TurboQuantLoader (proxy mode — llama-server backend)" -ForegroundColor Cyan
+Write-Host "Starting TurboQuantLoader (proxy mode - llama-server backend)" -ForegroundColor Cyan
 
 # No feature flags required: GPU backend is inside llama-server, not this process.
 cargo run --release -- serve
