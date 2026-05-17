@@ -23,7 +23,8 @@ pub mod stream_parser;
 pub mod types;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use axum::routing::{get, post};
@@ -53,6 +54,11 @@ pub struct AppState {
     /// Handlers check this flag and return 503 when switching; clients should
     /// retry with a short back-off (the switch typically takes 30–180 s).
     pub switching: Arc<AtomicBool>,
+    /// Timestamp of the most recent completed inference request.
+    ///
+    /// Used by the idle guard in [`AppState::trigger_model_switch`]: a switch
+    /// is blocked while the model has been active within `model_idle_timeout_secs`.
+    pub last_request_at: Arc<Mutex<Instant>>,
 }
 
 impl AppState {
@@ -65,6 +71,16 @@ impl AppState {
     /// Clone the current `Arc<AppConfig>`.
     pub async fn config_snapshot(&self) -> Arc<AppConfig> {
         self.config.read().await.clone()
+    }
+
+    /// Record that an inference request just completed.
+    ///
+    /// Call this once per successful chat request (before returning the response)
+    /// so the idle guard knows the model is actively in use.
+    pub fn touch_last_request(&self) {
+        if let Ok(mut t) = self.last_request_at.lock() {
+            *t = Instant::now();
+        }
     }
 
     /// Short name of the currently-loaded model (file stem of `model_path`).
@@ -92,6 +108,25 @@ impl AppState {
             tracing::warn!(model = %name, "model not found in registry or models_dir — ignoring switch request");
             return false;
         };
+
+        // Idle guard: refuse the switch while the model has been recently used.
+        let timeout_secs = config.model.model_idle_timeout_secs;
+        if timeout_secs > 0 {
+            let idle = self
+                .last_request_at
+                .lock()
+                .map(|t| t.elapsed())
+                .unwrap_or_default();
+            if idle.as_secs() < timeout_secs {
+                tracing::info!(
+                    model = %name,
+                    idle_secs = idle.as_secs(),
+                    required_idle_secs = timeout_secs,
+                    "model switch blocked — model active within idle timeout"
+                );
+                return false;
+            }
+        }
 
         // CAS: set switching false→true. If already true, a switch is in flight.
         if self
@@ -194,6 +229,7 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         config: Arc::new(RwLock::new(config)),
         metrics,
         switching: Arc::new(AtomicBool::new(false)),
+        last_request_at: Arc::new(Mutex::new(Instant::now())),
     };
 
     let router = build_router(state);

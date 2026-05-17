@@ -54,6 +54,14 @@ pub struct ModelConfig {
     /// If `None` the server uses `model_path` directly.
     #[serde(default)]
     pub default_model: Option<String>,
+    /// Seconds of inactivity required before a client-requested model switch is
+    /// allowed. Prevents mid-session reloads when an agent sends a different
+    /// `model` string across requests. Default: `1800` (30 minutes).
+    ///
+    /// Set to `0` to disable the guard (always switch immediately).
+    /// Admin `POST /v1/admin/load` bypasses this timeout unconditionally.
+    #[serde(default = "default_idle_timeout")]
+    pub model_idle_timeout_secs: u64,
 }
 
 impl Default for ModelConfig {
@@ -69,12 +77,17 @@ impl Default for ModelConfig {
             batch_size: 512,
             threads: default_thread_count(),
             default_model: None,
+            model_idle_timeout_secs: default_idle_timeout(),
         }
     }
 }
 
 fn default_main_gpu() -> i32 {
     -1
+}
+
+fn default_idle_timeout() -> u64 {
+    1800
 }
 
 /// Returns half the logical CPU count, falling back to `1`.

@@ -55,6 +55,8 @@ pub async fn chat_completions(
         // resolve returned None (unknown model) — fall through and serve with current model
     }
 
+    state.touch_last_request();
+
     let proc = state.process_snapshot().await;
     let cfg = state.config_snapshot().await;
     let model_name = model_name_from_config(&cfg);

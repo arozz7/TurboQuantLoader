@@ -49,6 +49,12 @@ context_size = 262144
 batch_size   = 4096
 threads      = 8    # CPU threads for non-GPU ops; tune to your core count
 
+# model_idle_timeout_secs: seconds of inactivity required before a client-requested
+# model switch is allowed. Prevents mid-session reloads when an agent sends a
+# different `model` string across turns. Set to 0 to disable.
+# Admin POST /v1/admin/load always bypasses this timeout.
+model_idle_timeout_secs = 1800   # 30 minutes
+
 [kv_cache]
 # bits: 2 | 3 | 4 | 8
 # 4-bit (Q4_0) = ~3.9x compression, near-zero quality loss — recommended default

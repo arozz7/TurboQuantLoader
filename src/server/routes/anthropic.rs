@@ -63,6 +63,8 @@ pub async fn create_message(
         }
     }
 
+    state.touch_last_request();
+
     let msg_count = req.messages.len();
     let has_tools = req.tools.is_some();
     let max_tokens = req.max_tokens.min(4096);
