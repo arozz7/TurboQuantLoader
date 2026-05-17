@@ -35,21 +35,27 @@ pub struct LlamaProcess {
     state: Arc<Mutex<ProcessState>>,
     child: Arc<Mutex<Option<Child>>>,
     /// Reqwest client reused for health polling.
-    http: reqwest::Client,
+    health_client: reqwest::Client,
+    /// Reqwest client used for proxying requests (long timeout).
+    proxy_client: reqwest::Client,
 }
 
 impl LlamaProcess {
     /// Spawn the backend and wait until it is ready.
     pub async fn start(config: Arc<AppConfig>) -> Result<Self> {
-        let http = reqwest::Client::builder()
+        let health_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .build()
-            .context("failed to build reqwest client")?;
+            .context("failed to build reqwest health client")?;
+
+        let proxy_client = reqwest::Client::builder()
+            .build()
+            .context("failed to build reqwest proxy client")?;
 
         let state = Arc::new(Mutex::new(ProcessState::Starting));
         let child = Arc::new(Mutex::new(None::<Child>));
 
-        let proc = LlamaProcess { config, state, child, http };
+        let proc = LlamaProcess { config, state, child, health_client, proxy_client };
         proc.spawn_child().await?;
         proc.wait_until_ready().await?;
 
@@ -129,7 +135,7 @@ impl LlamaProcess {
                 bail!("llama-server subprocess crashed during startup");
             }
 
-            match self.http.get(&health_url).send().await {
+            match self.health_client.get(&health_url).send().await {
                 Ok(resp) if resp.status().is_success() => {
                     *self.state.lock().await = ProcessState::Ready;
                     tracing::info!("llama-server is ready");
@@ -167,7 +173,7 @@ impl LlamaProcess {
         }
         let port = self.config.backend.internal_port;
         let url = format!("http://127.0.0.1:{port}/health");
-        self.http.get(&url).send().await.map(|r| r.status().is_success()).unwrap_or(false)
+        self.health_client.get(&url).send().await.map(|r| r.status().is_success()).unwrap_or(false)
     }
 
     /// Returns the OS PID of the subprocess, if running.
@@ -214,7 +220,7 @@ impl LlamaProcess {
 
     /// A reference to the reqwest client, for reuse by the proxy layer.
     pub fn http_client(&self) -> &reqwest::Client {
-        &self.http
+        &self.proxy_client
     }
 }
 
@@ -251,6 +257,9 @@ fn build_args(config: &AppConfig) -> Vec<String> {
     if !m.tensor_split.is_empty() && m.tensor_split != [1.0_f32] {
         let split: String = m.tensor_split.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",");
         args.extend(["--tensor-split".into(), split]);
+    } else if m.main_gpu >= 0 {
+        // If a main GPU is specified but no split weights are given, restrict the model entirely to the main GPU.
+        args.extend(["--split-mode".into(), "none".into()]);
     }
 
     // Context and batching.
@@ -263,7 +272,19 @@ fn build_args(config: &AppConfig) -> Vec<String> {
         args.extend(["--mmproj".into(), mmproj.to_string_lossy().into_owned()]);
     }
 
-    // TurboQuant variant: append the KV cache type flag.
+    // KV Cache settings for native llama-server.
+    if b.variant == BackendVariant::LlamaServer {
+        let bit_type = match config.kv_cache.bits {
+            crate::config::KvBits::Two => "q2_K",
+            crate::config::KvBits::Three => "q3_K",
+            crate::config::KvBits::Four => "q4_0",
+            crate::config::KvBits::Eight => "q8_0",
+        };
+        args.extend(["--cache-type-k".into(), bit_type.into()]);
+        args.extend(["--cache-type-v".into(), bit_type.into()]);
+    }
+
+    // TurboQuant variant: append the custom KV cache type flag.
     if b.variant == BackendVariant::TurboQuant {
         args.extend(["--cache-type-k".into(), "turbo3".into()]);
     }

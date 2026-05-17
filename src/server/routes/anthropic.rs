@@ -19,8 +19,10 @@
 //! text block runs at index 0.
 
 use std::convert::Infallible;
+use std::sync::atomic::Ordering;
 
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -28,6 +30,7 @@ use futures::StreamExt as _;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::model::backend::GenerateEvent;
+use crate::model::registry::ModelRegistry;
 use crate::server::error::ApiError;
 use crate::server::proxy::{build_chat_body, spawn_tracked_reader};
 use crate::server::sse::{
@@ -47,6 +50,19 @@ pub async fn create_message(
     State(state): State<AppState>,
     Json(req): Json<MessagesRequest>,
 ) -> Result<Response, ApiError> {
+    // Gate: return 503 while a model switch is in progress.
+    if state.switching.load(Ordering::SeqCst) {
+        return Ok(switching_503());
+    }
+
+    // Trigger a model switch when the client requests a different model.
+    let current = state.current_model_name().await;
+    if !ModelRegistry::matches_current(&req.model, &current) {
+        if state.trigger_model_switch(&req.model).await {
+            return Ok(switching_503());
+        }
+    }
+
     let msg_count = req.messages.len();
     let has_tools = req.tools.is_some();
     let max_tokens = req.max_tokens.min(4096);
@@ -110,6 +126,23 @@ pub async fn create_message(
 
         Ok(full_response(text, prompt_tokens, completion_tokens, &model_name))
     }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn switching_503() -> Response {
+    let body = serde_json::json!({
+        "error": {
+            "message": "model switching in progress — retry in a few seconds",
+            "type": "service_unavailable",
+        }
+    });
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [("Retry-After", "10")],
+        Json(body),
+    )
+        .into_response()
 }
 
 // ── Request translation ───────────────────────────────────────────────────────

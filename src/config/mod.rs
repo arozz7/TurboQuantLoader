@@ -5,7 +5,7 @@ mod server;
 
 pub use backend::{BackendConfig, BackendVariant};
 pub use kv_cache::{KvBits, KvCacheConfig, KvStrategy};
-pub use model::ModelConfig;
+pub use model::{ModelConfig, ModelDefinition};
 pub use server::ServerConfig;
 
 use std::path::Path;
@@ -31,6 +31,12 @@ pub struct AppConfig {
     /// llama-server subprocess backend settings.
     #[serde(default)]
     pub backend: BackendConfig,
+    /// Named model registry (`[[models]]` in TOML).
+    ///
+    /// Agents select a model by sending its `name` as the OpenAI `model` field.
+    /// Absent → empty list (server uses `[model] model_path` directly).
+    #[serde(default)]
+    pub models: Vec<ModelDefinition>,
 }
 
 impl Default for AppConfig {
@@ -40,6 +46,7 @@ impl Default for AppConfig {
             model: ModelConfig::default(),
             kv_cache: KvCacheConfig::default(),
             backend: BackendConfig::default(),
+            models: Vec::new(),
         }
     }
 }

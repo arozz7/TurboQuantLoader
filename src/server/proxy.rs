@@ -118,6 +118,7 @@ pub async fn spawn_event_reader(
         let mut stream = response.bytes_stream();
         let mut completion_tokens: u32 = 0;
         let mut prompt_tokens: u32 = 0;
+        let mut finish_reason_str = String::from("stop");
 
         while let Some(chunk) = stream.next().await {
             let bytes = match chunk {
@@ -155,6 +156,12 @@ pub async fn spawn_event_reader(
                                 usage["completion_tokens"].as_u64().unwrap_or(0) as u32;
                         }
 
+                        if let Some(fr) = v["choices"][0]["finish_reason"].as_str() {
+                            if !fr.is_empty() && fr != "null" {
+                                finish_reason_str = fr.to_string();
+                            }
+                        }
+
                         if let Some(content) = v["choices"][0]["delta"]["content"].as_str() {
                             if !content.is_empty() {
                                 if completion_tokens == 0 {
@@ -177,6 +184,7 @@ pub async fn spawn_event_reader(
                 tokens_generated: completion_tokens,
                 context_tokens: prompt_tokens + completion_tokens,
                 tokens_per_second: 0.0,
+                finish_reason: finish_reason_str,
             }))
             .await;
     });

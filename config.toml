@@ -15,13 +15,13 @@ binary_path          = "J:/llama/llama-server.exe"
 internal_port        = 7433
 startup_timeout_secs = 180
 restart_on_crash     = true
-# Extra CLI flags appended verbatim. Flash-attn and MTP speculative decoding for Qwen3.6.
-extra_flags          = ["--flash-attn", "--spec-type", "draft-mtp", "--spec-draft-n-max", "2"]
+# Extra CLI flags appended verbatim. Flash-attn enabled. (MTP speculative decoding disabled for Vulkan compatibility).
+extra_flags          = ["--flash-attn", "on", "--spec-type", "none"]
 
 [model]
 # ── Path configuration (platform-specific — override in config.local.toml) ───
 # Current dev machine (Windows):
-model_path   = "J:/llama/Models/unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q6_K.gguf"
+model_path   = "J:/llama/Models/unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q4_K_S.gguf"
 # macOS example:   model_path = "/Users/you/llama/Models/..."
 # Linux example:   model_path = "/home/you/llama/Models/..."
 # Env override:    TQL_MODEL_PATH=/path/to/model.gguf
@@ -39,20 +39,52 @@ n_gpu_layers = -1
 # Device [0] = NVIDIA RTX 4070 Ti Super (16 GB, CUDA+Vulkan) — overflow
 main_gpu = 1
 
-# tensor_split: proportional VRAM weights for --tensor-split (RTX 4070 Ti Super, Arc B70)
-# Qwen3.6-27B Q6_K (~22 GB) fits entirely on Arc B70 alone.
-# For 262k context KV overflow, the RTX 4070 Ti Super absorbs excess.
-tensor_split = [16.0, 32.0]
+# tensor_split: only set this if you need to split across GPUs.
+# Qwen3.6-27B Q6_K (~22 GB) fits entirely on Arc B70 (32 GB) — no split needed.
+# If 262k context KV cache overflows Arc B70, uncomment and set weights:
+# tensor_split = [16.0, 32.0]
 
 # context_size: max supported by Qwen3.6 model
 context_size = 262144
-batch_size   = 512
+batch_size   = 4096
 threads      = 8    # CPU threads for non-GPU ops; tune to your core count
 
 [kv_cache]
 # bits: 2 | 3 | 4 | 8
 # 4-bit (Q4_0) = ~3.9x compression, near-zero quality loss — recommended default
-bits             = 4
+bits             = 8
 # strategy: "llama_native" | "turbo_quant"
 strategy         = "llama_native"
 # memory_budget_mb = 4096   # optional cap; omit for unlimited
+
+# ── Named model registry ──────────────────────────────────────────────────────
+# Agents select a model by passing its `name` as the OpenAI `model` field.
+# All fields except `name` and `path` are optional — absent values inherit the
+# corresponding [model] section defaults.
+#
+# Resolution order when a client sends `model: "some-name"`:
+#   1. Exact match on `name` below
+#   2. Substring match on `name` below
+#   3. File-stem substring scan of `models_dir`
+#   4. Unknown → serve with currently loaded model (no switch)
+
+[[models]]
+name          = "Qwen3.6-27b-Q4_K_S"
+path          = "J:/llama/Models/unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q4_K_S.gguf"
+context_size  = 262144
+n_gpu_layers  = -1
+main_gpu      = 1
+
+[[models]]
+name          = "Qwen3.6-27B-Q6_K"
+path          = "J:/llama/Models/unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q6_K.gguf"
+context_size  = 262144
+n_gpu_layers  = -1
+main_gpu      = 1
+
+# Example: add more models below as needed.
+# [[models]]
+# name         = "llama3-8b"
+# path         = "J:/llama/Models/Meta-Llama-3-8B-Instruct.Q5_K_M.gguf"
+# context_size = 8192
+# main_gpu     = 0

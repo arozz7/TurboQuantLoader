@@ -73,6 +73,8 @@ pub struct GenerateSummary {
     pub tokens_per_second: f32,
     /// Number of tokens in the full context at completion (prompt + generated).
     pub context_tokens: u32,
+    /// The reason generation stopped (e.g., "stop", "length").
+    pub finish_reason: String,
 }
 
 /// Async channel receiver that delivers [`GenerateEvent`]s from the backend.

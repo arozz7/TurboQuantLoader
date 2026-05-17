@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tracing::warn;
 
+use crate::config::{AppConfig, ModelDefinition};
+
 /// Metadata for a discovered GGUF model file.
 #[derive(Debug, Clone)]
 pub struct ModelEntry {
@@ -79,6 +81,58 @@ impl ModelRegistry {
     pub fn find_by_name<'a>(entries: &'a [ModelEntry], query: &str) -> Option<&'a ModelEntry> {
         let lower = query.to_lowercase();
         entries.iter().find(|e| e.name.to_lowercase().contains(&lower))
+    }
+
+    /// Resolve a model `name` to a [`ModelDefinition`] using `config`.
+    ///
+    /// Resolution order:
+    /// 1. Named registry (`config.models`) — exact match, then substring match.
+    /// 2. `models_dir` filesystem scan — substring match on file stem.
+    ///
+    /// Returns `None` when the name is unknown in both sources.
+    pub fn resolve(name: &str, config: &AppConfig) -> Option<ModelDefinition> {
+        let lower = name.to_lowercase();
+
+        // 1. Exact name match in registry.
+        if let Some(def) = config.models.iter().find(|m| m.name.to_lowercase() == lower) {
+            return Some(def.clone());
+        }
+
+        // 2. Substring match in registry.
+        if let Some(def) = config.models.iter().find(|m| m.name.to_lowercase().contains(&lower)) {
+            return Some(def.clone());
+        }
+
+        // 3. Filesystem scan fallback — returns a synthetic definition with no overrides.
+        if let Ok(entries) = Self::scan(&config.model.models_dir) {
+            if let Some(entry) = Self::find_by_name(&entries, name) {
+                return Some(ModelDefinition {
+                    name: entry.name.clone(),
+                    path: entry.path.clone(),
+                    context_size: None,
+                    n_gpu_layers: None,
+                    main_gpu: None,
+                    batch_size: None,
+                    tensor_split: None,
+                });
+            }
+        }
+
+        None
+    }
+
+    /// Returns `true` when `requested` refers to the currently-loaded model.
+    ///
+    /// Treats `"local"` and empty strings as wildcards (always matches). Otherwise
+    /// checks for case-insensitive equality or whether the current model name
+    /// contains the requested string, so `"qwen3"` matches `"Qwen3.6-27B-Q4_K_S"`.
+    pub fn matches_current(requested: &str, current: &str) -> bool {
+        if requested.is_empty() || requested.eq_ignore_ascii_case("local") {
+            return true;
+        }
+        let req = requested.to_lowercase();
+        let cur = current.to_lowercase();
+        cur == req || cur.contains(&req)
     }
 }
 

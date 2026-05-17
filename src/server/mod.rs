@@ -22,6 +22,7 @@ mod sse;
 pub mod stream_parser;
 pub mod types;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -32,6 +33,7 @@ use tracing::info;
 
 use crate::config::AppConfig;
 use crate::metrics::MetricsCollector;
+use crate::model::registry::ModelRegistry;
 use llama_process::LlamaProcess;
 
 /// Shared state injected into every request handler via axum `State`.
@@ -46,6 +48,11 @@ pub struct AppState {
     pub config: Arc<RwLock<Arc<AppConfig>>>,
     /// Rolling request metrics + GPU telemetry.
     pub metrics: Arc<MetricsCollector>,
+    /// Set to `true` while a model switch is in progress.
+    ///
+    /// Handlers check this flag and return 503 when switching; clients should
+    /// retry with a short back-off (the switch typically takes 30–180 s).
+    pub switching: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -58,6 +65,93 @@ impl AppState {
     /// Clone the current `Arc<AppConfig>`.
     pub async fn config_snapshot(&self) -> Arc<AppConfig> {
         self.config.read().await.clone()
+    }
+
+    /// Short name of the currently-loaded model (file stem of `model_path`).
+    pub async fn current_model_name(&self) -> String {
+        let cfg = self.config_snapshot().await;
+        cfg.model
+            .model_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("local-model")
+            .to_string()
+    }
+
+    /// Attempt to switch to the named model.
+    ///
+    /// Returns `true` when a switch was triggered (caller should return 503).
+    /// Returns `false` when the name cannot be resolved (caller proceeds normally).
+    ///
+    /// The actual model load runs on a background Tokio task; `switching` is
+    /// reset to `false` once the new process is ready (or on failure).
+    pub async fn trigger_model_switch(&self, name: &str) -> bool {
+        let config = self.config_snapshot().await;
+
+        let Some(def) = ModelRegistry::resolve(name, &config) else {
+            tracing::warn!(model = %name, "model not found in registry or models_dir — ignoring switch request");
+            return false;
+        };
+
+        // CAS: set switching false→true. If already true, a switch is in flight.
+        if self
+            .switching
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            tracing::info!(model = %name, "model switch already in progress");
+            return true;
+        }
+
+        // Build updated config from the definition, falling back to base values.
+        let mut new_config = (*config).clone();
+        new_config.model.model_path = def.path;
+        if let Some(ctx) = def.context_size {
+            new_config.model.context_size = ctx;
+        }
+        if let Some(layers) = def.n_gpu_layers {
+            new_config.model.n_gpu_layers = layers;
+        }
+        if let Some(gpu) = def.main_gpu {
+            new_config.model.main_gpu = gpu;
+        }
+        if let Some(batch) = def.batch_size {
+            new_config.model.batch_size = batch;
+        }
+        if let Some(split) = def.tensor_split {
+            new_config.model.tensor_split = split;
+        }
+        let new_config = Arc::new(new_config);
+
+        let state = self.clone();
+        let new_config_clone = Arc::clone(&new_config);
+
+        tokio::spawn(async move {
+            let model_display = new_config_clone.model.model_path.display().to_string();
+            tracing::info!(model = %model_display, "model switch started");
+
+            {
+                let old_proc = state.process_snapshot().await;
+                old_proc.kill().await;
+            }
+
+            // Update config now so status endpoint reflects the incoming model.
+            *state.config.write().await = Arc::clone(&new_config_clone);
+
+            match LlamaProcess::start(new_config_clone).await {
+                Ok(new_proc) => {
+                    *state.process.write().await = Arc::new(new_proc);
+                    tracing::info!(model = %model_display, "model switch complete");
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, model = %model_display, "model switch failed");
+                }
+            }
+
+            state.switching.store(false, Ordering::SeqCst);
+        });
+
+        true
     }
 }
 
@@ -99,6 +193,7 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         process: Arc::new(RwLock::new(Arc::new(process))),
         config: Arc::new(RwLock::new(config)),
         metrics,
+        switching: Arc::new(AtomicBool::new(false)),
     };
 
     let router = build_router(state);

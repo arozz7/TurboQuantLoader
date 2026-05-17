@@ -6,12 +6,16 @@
 use std::convert::Infallible;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use std::sync::atomic::Ordering;
+
 use axum::extract::State;
-use axum::response::Response;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::model::backend::GenerateEvent;
+use crate::model::registry::ModelRegistry;
 use crate::server::error::ApiError;
 use crate::server::proxy::{build_chat_body, proxy_request, spawn_tracked_reader};
 use crate::server::sse::{data_event, sse_response};
@@ -25,8 +29,32 @@ use crate::server::AppState;
 /// `POST /v1/chat/completions`
 pub async fn chat_completions(
     State(state): State<AppState>,
-    Json(req): Json<ChatCompletionRequest>,
+    body: axum::body::Bytes,
 ) -> Result<Response, ApiError> {
+    // Gate: return 503 while a model switch is in progress.
+    if state.switching.load(Ordering::SeqCst) {
+        return Ok(switching_503());
+    }
+
+    let req: ChatCompletionRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            let body_str = String::from_utf8_lossy(&body);
+            tracing::error!("Failed to parse ChatCompletionRequest: {}\nRaw Body: {}", e, body_str);
+            return Err(anyhow::anyhow!("Invalid request: {}", e).into());
+        }
+    };
+
+    // If the client requested a specific model that differs from the loaded one,
+    // trigger a switch and return 503 so the client retries after load.
+    let current = state.current_model_name().await;
+    if !ModelRegistry::matches_current(&req.model, &current) {
+        if state.trigger_model_switch(&req.model).await {
+            return Ok(switching_503());
+        }
+        // resolve returned None (unknown model) — fall through and serve with current model
+    }
+
     let proc = state.process_snapshot().await;
     let cfg = state.config_snapshot().await;
     let model_name = model_name_from_config(&cfg);
@@ -61,7 +89,22 @@ fn prepare_messages(req: &ChatCompletionRequest) -> Vec<(&'static str, String)> 
     let mut messages: Vec<(String, String)> = req
         .messages
         .iter()
-        .map(|m| (m.role.clone(), m.content.clone().into_text()))
+        .map(|m| {
+            let mut text = m.content.as_ref().map(|c| c.clone().into_text()).unwrap_or_default();
+            
+            if let Some(tool_calls) = &m.tool_calls {
+                for tc in tool_calls {
+                    if let (Some(name), Some(args)) = (&tc.function.name, &tc.function.arguments) {
+                        text.push_str(&format!(
+                            "\n<tool_call>\n{{\"name\": \"{}\", \"arguments\": {}}}\n</tool_call>",
+                            name, args
+                        ));
+                    }
+                }
+            }
+            
+            (m.role.clone(), text)
+        })
         .collect();
 
     if let Some(tools) = &req.tools {
@@ -166,7 +209,7 @@ fn streaming_response(mut rx: crate::model::backend::GenerateStream, model: Stri
                                     tool_calls: Some(vec![ToolCallInfo {
                                         index: 0,
                                         id: Some(new_id("call")),
-                                        r#type: Some("function"),
+                                        r#type: Some("function".to_string()),
                                         function: ToolCallFunction {
                                             name: Some(name),
                                             arguments: Some(
@@ -193,14 +236,23 @@ fn streaming_response(mut rx: crate::model::backend::GenerateStream, model: Stri
                     }
                     emit_events(evts, &tx);
                 }
-                GenerateEvent::Done(_) => {
+                GenerateEvent::Done(summary) => {
                     let evts = parser.flush();
                     if evts.iter().any(|e| matches!(e, ParsedEvent::ToolCallReady { .. })) {
                         tool_called = true;
                     }
                     emit_events(evts, &tx);
 
-                    let finish_reason = if tool_called { "tool_calls" } else { "stop" };
+                    let finish_reason = if tool_called { 
+                        "tool_calls" 
+                    } else { 
+                        match summary.finish_reason.as_str() {
+                            "length" => "length",
+                            "tool_calls" => "tool_calls",
+                            _ => "stop",
+                        }
+                    };
+                    
                     let _ = tx.send(Ok::<_, Infallible>(data_event(&ChatCompletionChunk {
                         id: id.clone(),
                         object: "chat.completion.chunk",
@@ -229,6 +281,21 @@ fn streaming_response(mut rx: crate::model::backend::GenerateStream, model: Stri
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn switching_503() -> Response {
+    let body = serde_json::json!({
+        "error": {
+            "message": "model switching in progress — retry in a few seconds",
+            "type": "service_unavailable",
+        }
+    });
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [("Retry-After", "10")],
+        Json(body),
+    )
+        .into_response()
+}
 
 fn model_name_from_config(config: &crate::config::AppConfig) -> String {
     config

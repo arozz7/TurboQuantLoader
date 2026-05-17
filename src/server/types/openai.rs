@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 pub enum MessageContent {
     Text(String),
     Parts(Vec<ContentPart>),
+    Unknown(serde_json::Value),
 }
 
 impl MessageContent {
@@ -24,9 +25,18 @@ impl MessageContent {
             Self::Text(s) => s,
             Self::Parts(parts) => parts
                 .into_iter()
-                .filter_map(|p| if p.r#type == "text" { Some(p.text) } else { None })
+                .filter_map(|p| if p.r#type == "text" { p.text } else { None })
                 .collect::<Vec<_>>()
                 .join(""),
+            Self::Unknown(val) => {
+                if val.is_null() {
+                    String::new()
+                } else if let Some(s) = val.as_str() {
+                    s.to_string()
+                } else {
+                    serde_json::to_string(&val).unwrap_or_default()
+                }
+            }
         }
     }
 }
@@ -34,22 +44,24 @@ impl MessageContent {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ContentPart {
     pub r#type: String,
-    #[serde(default)]
-    pub text: String,
+    pub text: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
-    pub content: MessageContent,
+    pub content: Option<MessageContent>,
+    pub tool_calls: Option<Vec<ToolCallInfo>>,
+    pub tool_call_id: Option<String>,
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionRequest {
-    /// Ignored — model is always the one loaded in config.
-    #[allow(dead_code)]
+    /// Requested model name. Triggers a hot-swap when it differs from the loaded model.
     pub model: String,
     pub messages: Vec<ChatMessage>,
+    #[serde(alias = "max_completion_tokens")]
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
     #[serde(default)]
@@ -62,7 +74,7 @@ pub struct ChatCompletionRequest {
 }
 
 fn default_max_tokens() -> u32 {
-    2048
+    32768
 }
 
 // ── Non-streaming response ────────────────────────────────────────────────────
@@ -99,7 +111,7 @@ pub struct ChatCompletionResponse {
 
 // ── Streaming chunk ───────────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallFunction {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -107,13 +119,14 @@ pub struct ToolCallFunction {
     pub arguments: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallInfo {
+    #[serde(default)]
     pub index: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub r#type: Option<&'static str>,
+    pub r#type: Option<String>,
     pub function: ToolCallFunction,
 }
 
