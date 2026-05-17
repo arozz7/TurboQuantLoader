@@ -67,6 +67,15 @@ pub async fn chat_completions(
     let top_p = req.top_p.unwrap_or(0.95);
     let top_k = req.top_k.unwrap_or(20);
 
+    tracing::info!(
+        model = %model_name,
+        stream = req.stream,
+        messages = req.messages.len(),
+        tools = req.tools.as_ref().map(|t| t.len()).unwrap_or(0),
+        max_tokens = req.max_tokens,
+        "OpenAI chat request"
+    );
+
     if req.stream {
         let body = build_chat_body(&messages, true, req.max_tokens, temperature, top_p, top_k);
         let rx = spawn_tracked_reader(
@@ -74,6 +83,7 @@ pub async fn chat_completions(
             &url,
             body,
             state.metrics.clone(),
+            model_name.clone(),
         )
         .await?;
         Ok(streaming_response(rx, model_name))

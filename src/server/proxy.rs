@@ -195,12 +195,14 @@ pub async fn spawn_event_reader(
 // ── Tracked reader (with metrics) ────────────────────────────────────────────
 
 /// Like [`spawn_event_reader`] but wraps the channel with a timing layer that
-/// records TTFT, TPS, and token counts into [`MetricsCollector`].
+/// records TTFT, TPS, and token counts into [`MetricsCollector`] and emits a
+/// structured completion log line.
 pub async fn spawn_tracked_reader(
     client: &reqwest::Client,
     url: &str,
     body: Vec<u8>,
     metrics: Arc<MetricsCollector>,
+    model: String,
 ) -> Result<GenerateStream, ApiError> {
     let start = Instant::now();
     let inner_rx = spawn_event_reader(client, url, body).await?;
@@ -237,6 +239,17 @@ pub async fn spawn_tracked_reader(
                         0.0
                     };
                     let prompt = summary.context_tokens.saturating_sub(tokens);
+
+                    tracing::info!(
+                        model = %model,
+                        prompt_tokens = prompt,
+                        completion_tokens = tokens,
+                        ttft_ms,
+                        generation_ms,
+                        tps = format!("{tps:.1}"),
+                        finish_reason = %summary.finish_reason,
+                        "request complete"
+                    );
 
                     metrics.inc_requests();
                     metrics

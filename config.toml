@@ -63,6 +63,18 @@ bits             = 8
 strategy         = "llama_native"
 # memory_budget_mb = 4096   # optional cap; omit for unlimited
 
+[logging]
+# Directory for rolling daily log files (relative to working dir, or absolute).
+# Created automatically if it does not exist.
+log_dir              = "logs"
+# Delete log files older than this many days at startup (0 = keep forever).
+log_retention_days   = 7
+# Log level written to the file. Independent of stdout level.
+# Accepts RUST_LOG syntax: "info", "debug", "turboquant_loader=debug,info", etc.
+file_log_level       = "info"
+# Log level written to stdout. Overridden by RUST_LOG env var if set.
+stdout_log_level     = "info"
+
 # ── Named model registry ──────────────────────────────────────────────────────
 # Agents select a model by passing its `name` as the OpenAI `model` field.
 # All fields except `name` and `path` are optional — absent values inherit the

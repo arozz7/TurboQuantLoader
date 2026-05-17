@@ -65,18 +65,6 @@ pub async fn create_message(
 
     state.touch_last_request();
 
-    let msg_count = req.messages.len();
-    let has_tools = req.tools.is_some();
-    let max_tokens = req.max_tokens.min(4096);
-    tracing::info!(
-        stream = req.stream,
-        messages = msg_count,
-        has_tools,
-        max_tokens,
-        requested_max_tokens = req.max_tokens,
-        "POST /v1/messages"
-    );
-
     let proc = state.process_snapshot().await;
     let cfg = state.config_snapshot().await;
 
@@ -88,6 +76,19 @@ pub async fn create_message(
         .unwrap_or("local-model")
         .to_string();
 
+    let msg_count = req.messages.len();
+    let has_tools = req.tools.is_some();
+    let max_tokens = req.max_tokens.min(4096);
+
+    tracing::info!(
+        model = %model_name,
+        stream = req.stream,
+        messages = msg_count,
+        tools = has_tools,
+        max_tokens,
+        "Anthropic messages request"
+    );
+
     let messages = to_openai_messages(&req);
     let temperature = req.temperature.unwrap_or(0.6);
     let top_p = req.top_p.unwrap_or(0.95);
@@ -98,7 +99,7 @@ pub async fn create_message(
     if req.stream {
         let url = format!("{base_url}/v1/chat/completions");
         let body = build_chat_body(&messages, true, max_tokens, temperature, top_p, top_k);
-        let rx = spawn_tracked_reader(&http, &url, body, state.metrics.clone()).await?;
+        let rx = spawn_tracked_reader(&http, &url, body, state.metrics.clone(), model_name.clone()).await?;
         Ok(streaming_response(rx, model_name))
     } else {
         let url = format!("{base_url}/v1/chat/completions");

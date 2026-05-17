@@ -1,10 +1,12 @@
 mod backend;
 mod kv_cache;
+mod logging;
 mod model;
 mod server;
 
 pub use backend::{BackendConfig, BackendVariant};
 pub use kv_cache::{KvBits, KvCacheConfig, KvStrategy};
+pub use logging::LoggingConfig;
 pub use model::{ModelConfig, ModelDefinition};
 pub use server::ServerConfig;
 
@@ -37,6 +39,9 @@ pub struct AppConfig {
     /// Absent → empty list (server uses `[model] model_path` directly).
     #[serde(default)]
     pub models: Vec<ModelDefinition>,
+    /// Log file output and retention settings.
+    #[serde(default)]
+    pub logging: LoggingConfig,
 }
 
 impl Default for AppConfig {
@@ -47,6 +52,7 @@ impl Default for AppConfig {
             kv_cache: KvCacheConfig::default(),
             backend: BackendConfig::default(),
             models: Vec::new(),
+            logging: LoggingConfig::default(),
         }
     }
 }

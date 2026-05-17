@@ -9,12 +9,16 @@ mod tui;
 
 use std::io::Write as _;
 use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing::info;
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::{fmt, EnvFilter};
 
-use config::{load_from_file, AppConfig, CliOverrides, KvBits, KvCacheConfig};
+use config::{load_from_file, AppConfig, CliOverrides, KvBits, KvCacheConfig, LoggingConfig};
 use inference::engine::{ChatMessage, ChatRequest, InferenceEngine};
 use model::backend::{GenerateEvent, SamplerParams};
 use model::registry::ModelRegistry;
@@ -98,24 +102,23 @@ async fn main() -> Result<()> {
     // when executing deeply contextual batches on Windows.
     std::env::set_var("LLAMA_CUDA_NO_GRAPHS", "1");
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
     let cli = Cli::parse();
 
+    // Load config before initialising tracing so the file appender knows where to write.
     let mut app_config = if cli.config.exists() {
         load_from_file(&cli.config)?
     } else {
-        tracing::warn!(
-            path = %cli.config.display(),
-            "config file not found — using built-in defaults"
+        eprintln!(
+            "warn: config file not found at '{}' — using built-in defaults",
+            cli.config.display()
         );
         AppConfig::default()
     };
+
+    // Initialise dual-subscriber tracing (stdout + rolling file).
+    // _log_guard must stay alive for the duration of main — dropping it flushes the
+    // non-blocking writer and terminates the background logging thread.
+    let _log_guard = init_tracing(&app_config.logging)?;
 
     match cli.command {
         Command::Serve(args) => {
@@ -427,6 +430,101 @@ fn cmd_list(config: &AppConfig) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ─── Logging ──────────────────────────────────────────────────────────────────
+
+/// Initialise a dual-subscriber tracing setup:
+///
+/// - **stdout** — colored, human-readable; level from `RUST_LOG` env var or
+///   `cfg.stdout_log_level`.
+/// - **file** — plain text, daily rolling in `cfg.log_dir`; level from
+///   `cfg.file_log_level`. The file name pattern is
+///   `turboquant.<YYYY-MM-DD>.log`.
+///
+/// The returned [`WorkerGuard`] must be kept alive for the duration of the
+/// program. Dropping it flushes the non-blocking writer buffer.
+fn init_tracing(cfg: &LoggingConfig) -> Result<WorkerGuard> {
+    // Ensure log directory exists.
+    std::fs::create_dir_all(&cfg.log_dir)
+        .with_context(|| format!("failed to create log directory: {}", cfg.log_dir.display()))?;
+
+    // Purge files older than the retention window before opening a new one.
+    if cfg.log_retention_days > 0 {
+        cleanup_old_logs(&cfg.log_dir, cfg.log_retention_days);
+    }
+
+    // Daily rolling file appender.
+    let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("turboquant")
+        .filename_suffix("log")
+        .build(&cfg.log_dir)
+        .context("failed to create rolling file appender")?;
+
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
+    // Stdout layer — colored, level from RUST_LOG or config.
+    let stdout_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(&cfg.stdout_log_level));
+
+    let stdout_layer = fmt::layer()
+        .with_target(false)
+        .with_filter(stdout_filter);
+
+    // File layer — no ANSI, full target path, independent level.
+    let file_filter = EnvFilter::new(&cfg.file_log_level);
+
+    let file_layer = fmt::layer()
+        .with_ansi(false)
+        .with_target(true)
+        .with_writer(non_blocking)
+        .with_filter(file_filter);
+
+    tracing_subscriber::registry()
+        .with(stdout_layer)
+        .with(file_layer)
+        .init();
+
+    Ok(guard)
+}
+
+/// Delete log files in `log_dir` whose last-modified time is older than
+/// `retention_days` days. Skips files it cannot stat or remove, logging a
+/// warning instead of aborting.
+fn cleanup_old_logs(log_dir: &PathBuf, retention_days: u32) {
+    let cutoff = match SystemTime::now().checked_sub(Duration::from_secs(u64::from(retention_days) * 86_400)) {
+        Some(t) => t,
+        None => return,
+    };
+
+    let Ok(entries) = std::fs::read_dir(log_dir) else { return };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+
+        // Only touch files that look like our log files.
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !name.starts_with("turboquant") || !name.ends_with(".log") {
+            continue;
+        }
+
+        let modified = match entry.metadata().and_then(|m| m.modified()) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("warn: could not stat log file {}: {e}", path.display());
+                continue;
+            }
+        };
+
+        if modified < cutoff {
+            if let Err(e) = std::fs::remove_file(&path) {
+                eprintln!("warn: could not remove old log file {}: {e}", path.display());
+            } else {
+                eprintln!("info: removed old log file: {}", path.display());
+            }
+        }
+    }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
