@@ -25,6 +25,7 @@ use crate::server::error::ApiError;
 ///
 /// `extra_headers` are merged into the upstream request; `Content-Type:
 /// application/json` is always set.
+#[allow(dead_code)]
 pub async fn proxy_request(
     client: &reqwest::Client,
     base_url: &str,
@@ -70,7 +71,7 @@ pub async fn proxy_request(
     // Stream the response body — works for both JSON blobs and SSE streams.
     let byte_stream = upstream
         .bytes_stream()
-        .map(|result| result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
+        .map(|result| result.map_err(std::io::Error::other));
     let body = Body::from_stream(byte_stream);
 
     let response = axum::response::Response::builder()
@@ -132,53 +133,48 @@ pub async fn spawn_event_reader(
             buf.push_str(&String::from_utf8_lossy(&bytes));
 
             // Drain complete SSE events (each event ends with \n\n).
-            loop {
-                if let Some(pos) = buf.find("\n\n") {
-                    let event_str = buf[..pos].to_string();
-                    buf.drain(..pos + 2);
+            while let Some(pos) = buf.find("\n\n") {
+                let event_str = buf[..pos].to_string();
+                buf.drain(..pos + 2);
 
-                    for line in event_str.lines() {
-                        let data = match line.strip_prefix("data: ") {
-                            Some(d) => d,
-                            None => continue,
-                        };
-                        if data == "[DONE]" {
-                            continue;
+                for line in event_str.lines() {
+                    let data = match line.strip_prefix("data: ") {
+                        Some(d) => d,
+                        None => continue,
+                    };
+                    if data == "[DONE]" {
+                        continue;
+                    }
+                    let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
+                        continue;
+                    };
+
+                    // Capture usage when llama-server includes it.
+                    if let Some(usage) = v.get("usage").filter(|u| !u.is_null()) {
+                        prompt_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0) as u32;
+                        completion_tokens = usage["completion_tokens"].as_u64().unwrap_or(0) as u32;
+                    }
+
+                    if let Some(fr) = v["choices"][0]["finish_reason"].as_str() {
+                        if !fr.is_empty() && fr != "null" {
+                            finish_reason_str = fr.to_string();
                         }
-                        let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
-                            continue;
-                        };
+                    }
 
-                        // Capture usage when llama-server includes it.
-                        if let Some(usage) = v.get("usage").filter(|u| !u.is_null()) {
-                            prompt_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0) as u32;
-                            completion_tokens =
-                                usage["completion_tokens"].as_u64().unwrap_or(0) as u32;
-                        }
-
-                        if let Some(fr) = v["choices"][0]["finish_reason"].as_str() {
-                            if !fr.is_empty() && fr != "null" {
-                                finish_reason_str = fr.to_string();
+                    if let Some(content) = v["choices"][0]["delta"]["content"].as_str() {
+                        if !content.is_empty() {
+                            if completion_tokens == 0 {
+                                completion_tokens += 1;
                             }
-                        }
-
-                        if let Some(content) = v["choices"][0]["delta"]["content"].as_str() {
-                            if !content.is_empty() {
-                                if completion_tokens == 0 {
-                                    completion_tokens += 1;
-                                }
-                                if tx
-                                    .send(GenerateEvent::Token(content.to_string()))
-                                    .await
-                                    .is_err()
-                                {
-                                    return;
-                                }
+                            if tx
+                                .send(GenerateEvent::Token(content.to_string()))
+                                .await
+                                .is_err()
+                            {
+                                return;
                             }
                         }
                     }
-                } else {
-                    break;
                 }
             }
         }

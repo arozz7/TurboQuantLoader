@@ -37,6 +37,7 @@ pub fn named_event(name: &'static str, value: &impl serde::Serialize) -> Event {
 }
 
 /// Build a `content_block_start` event for a thinking block at `index`.
+#[allow(dead_code)]
 pub fn thinking_block_start_event(index: u32) -> Event {
     // Emit raw JSON directly — we need a thinking variant of content_block_start
     // which doesn't match the existing text ContentBlockStartData struct.
@@ -51,6 +52,7 @@ pub fn thinking_block_start_event(index: u32) -> Event {
 }
 
 /// Build a `content_block_delta` event carrying a thinking token.
+#[allow(dead_code)]
 pub fn thinking_delta_event(index: u32, thinking: String) -> Event {
     use crate::server::types::anthropic::{ContentBlockDeltaThinkingEvent, ThinkingDelta};
     named_event(

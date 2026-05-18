@@ -24,6 +24,7 @@ impl TokenStream {
 
     /// Unwrap the underlying [`GenerateStream`] for use with async stream adapters
     /// (e.g. `tokio_stream::wrappers::ReceiverStream` in the HTTP server).
+    #[allow(dead_code)]
     pub fn into_inner(self) -> GenerateStream {
         self.rx
     }
@@ -33,6 +34,7 @@ impl TokenStream {
     /// # Errors
     /// Returns `Err(String)` if the backend sent a [`GenerateEvent::Error`] or
     /// the channel closed without a `Done` event.
+    #[allow(dead_code)]
     pub async fn collect_full(mut self) -> Result<(String, GenerateSummary), String> {
         let mut text = String::new();
         loop {

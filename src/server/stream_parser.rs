@@ -60,6 +60,7 @@ impl StreamParser {
     }
 
     /// True if the parser is currently inside a thinking block.
+    #[allow(dead_code)]
     pub fn is_thinking(&self) -> bool {
         self.state == State::Thinking
     }

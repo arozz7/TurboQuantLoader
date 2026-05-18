@@ -52,7 +52,9 @@ pub struct ChatMessage {
     pub role: String,
     pub content: Option<MessageContent>,
     pub tool_calls: Option<Vec<ToolCallInfo>>,
+    #[allow(dead_code)]
     pub tool_call_id: Option<String>,
+    #[allow(dead_code)]
     pub name: Option<String>,
 }
 
@@ -69,6 +71,7 @@ pub struct ChatCompletionRequest {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub top_k: Option<u32>,
+    #[allow(dead_code)]
     pub seed: Option<u64>,
     pub tools: Option<Vec<serde_json::Value>>,
 }
@@ -79,6 +82,7 @@ fn default_max_tokens() -> u32 {
 
 // ── Non-streaming response ────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct Usage {
     pub prompt_tokens: u32,
@@ -86,12 +90,14 @@ pub struct Usage {
     pub total_tokens: u32,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct ResponseMessage {
     pub role: &'static str,
     pub content: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct Choice {
     pub index: u32,
@@ -99,6 +105,7 @@ pub struct Choice {
     pub finish_reason: &'static str,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct ChatCompletionResponse {
     pub id: String,

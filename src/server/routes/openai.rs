@@ -53,12 +53,12 @@ pub async fn chat_completions(
     // If the client requested a specific model that differs from the loaded one,
     // trigger a switch and return 503 so the client retries after load.
     let current = state.current_model_name().await;
-    if !ModelRegistry::matches_current(&req.model, &current) {
-        if state.trigger_model_switch(&req.model).await {
-            return Ok(switching_503());
-        }
-        // resolve returned None (unknown model) — fall through and serve with current model
+    if !ModelRegistry::matches_current(&req.model, &current)
+        && state.trigger_model_switch(&req.model).await
+    {
+        return Ok(switching_503());
     }
+    // resolve returned None (unknown model) — fall through and serve with current model
 
     state.touch_last_request();
 

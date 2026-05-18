@@ -17,10 +17,12 @@ pub struct ModelEntry {
     /// Model architecture string read from the GGUF header.
     ///
     /// `None` in Phase 1 — populated in Phase 2 when the GGUF header is parsed.
+    #[allow(dead_code)]
     pub arch: Option<String>,
     /// Quantization type string, e.g. `"IQ3_XXS"`.
     ///
     /// `None` in Phase 1 — populated in Phase 2 when the GGUF header is parsed.
+    #[allow(dead_code)]
     pub quant_type: Option<String>,
     /// `true` when a sibling `mmproj-*.gguf` vision projector exists in the
     /// same directory as this model.

@@ -6,7 +6,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::Result;
@@ -154,7 +154,7 @@ fn today_str() -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-fn open_writer(log_dir: &PathBuf, date: &str) -> Result<BufWriter<File>> {
+fn open_writer(log_dir: &Path, date: &str) -> Result<BufWriter<File>> {
     let path = log_dir.join(format!("conversations.{date}.jsonl"));
     let file = OpenOptions::new().create(true).append(true).open(&path)?;
     Ok(BufWriter::new(file))
@@ -162,7 +162,7 @@ fn open_writer(log_dir: &PathBuf, date: &str) -> Result<BufWriter<File>> {
 
 /// Convert days-since-Unix-epoch to (year, month, day) in the proleptic
 /// Gregorian calendar (UTC). Used to avoid a chrono dependency.
-fn days_to_ymd(mut days: u64) -> (u32, u32, u32) {
+fn days_to_ymd(days: u64) -> (u32, u32, u32) {
     // Algorithm from https://howardhinnant.github.io/date_algorithms.html
     let z = days as i64 + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;

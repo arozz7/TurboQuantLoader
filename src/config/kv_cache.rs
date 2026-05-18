@@ -3,22 +3,17 @@ use serde::{Deserialize, Serialize};
 /// KV cache quantization bit-width.
 ///
 /// Serialized/deserialized as an integer (`2`, `3`, `4`, `8`) in `config.toml`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum KvBits {
     /// 2-bit quantization.
     Two,
     /// 3-bit quantization.
     Three,
     /// 4-bit quantization (default).
+    #[default]
     Four,
     /// 8-bit quantization.
     Eight,
-}
-
-impl Default for KvBits {
-    fn default() -> Self {
-        Self::Four
-    }
 }
 
 impl TryFrom<u8> for KvBits {
@@ -65,24 +60,19 @@ impl<'de> Deserialize<'de> for KvBits {
 ///
 /// Serialized/deserialized as a snake_case string (`"llama_native"`,
 /// `"turbo_quant"`) in `config.toml`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum KvStrategy {
     /// llama.cpp native quantized KV cache (`Q4_0` / `Q8_0`). Always available.
+    #[default]
     LlamaNative,
     /// TurboQuant KV compression. Requires the `turbo-kv` Cargo feature.
     /// Falls back to `LlamaNative` with a warning when the feature is absent.
     TurboQuant,
 }
 
-impl Default for KvStrategy {
-    fn default() -> Self {
-        Self::LlamaNative
-    }
-}
-
 /// KV cache configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct KvCacheConfig {
     /// Quantization bit-width for K and V tensors (default: `4`).
     #[serde(default)]
@@ -92,14 +82,4 @@ pub struct KvCacheConfig {
     pub strategy: KvStrategy,
     /// Hard cap on KV cache memory in megabytes. `None` means unlimited.
     pub memory_budget_mb: Option<u32>,
-}
-
-impl Default for KvCacheConfig {
-    fn default() -> Self {
-        Self {
-            bits: KvBits::default(),
-            strategy: KvStrategy::default(),
-            memory_budget_mb: None,
-        }
-    }
 }

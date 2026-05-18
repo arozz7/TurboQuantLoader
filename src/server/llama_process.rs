@@ -173,6 +173,7 @@ impl LlamaProcess {
     }
 
     /// Returns `true` if the subprocess is running and healthy.
+    #[allow(dead_code)]
     pub async fn is_healthy(&self) -> bool {
         if *self.state.lock().await != ProcessState::Ready {
             return false;

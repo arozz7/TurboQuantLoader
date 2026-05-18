@@ -59,10 +59,10 @@ pub async fn create_message(
 
     // Trigger a model switch when the client requests a different model.
     let current = state.current_model_name().await;
-    if !ModelRegistry::matches_current(&req.model, &current) {
-        if state.trigger_model_switch(&req.model).await {
-            return Ok(switching_503());
-        }
+    if !ModelRegistry::matches_current(&req.model, &current)
+        && state.trigger_model_switch(&req.model).await
+    {
+        return Ok(switching_503());
     }
 
     state.touch_last_request();

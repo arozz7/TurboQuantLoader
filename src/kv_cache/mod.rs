@@ -8,9 +8,11 @@ pub mod prefix_cache;
 pub mod turbo_quant;
 
 pub use llama_native::LlamaNativeCache;
+#[allow(unused_imports)]
 pub use prefix_cache::PrefixCache;
 
 /// Live statistics from the active KV cache.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct CacheStats {
     /// Memory currently consumed by the KV cache in megabytes.
@@ -27,6 +29,7 @@ pub struct CacheStats {
 }
 
 /// Abstraction over KV cache backends.
+#[allow(dead_code)]
 pub trait KvCacheBackend: Send + Sync {
     /// Apply quantization settings and memory budget from `cfg`.
     fn configure(&mut self, cfg: &KvCacheConfig) -> Result<()>;

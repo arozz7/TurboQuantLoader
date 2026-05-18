@@ -13,11 +13,13 @@
 /// the new suffix the caller must call `llama_kv_cache_seq_rm` (via
 /// `LlamaContext::clear_kv_cache_seq`) to remove any stale entries that
 /// follow the common prefix (e.g. the tokens generated in the previous turn).
+#[allow(dead_code)]
 pub struct PrefixCache {
     /// Token IDs of the last successfully decoded prompt (positions 0..len).
     cached_tokens: Vec<i32>,
 }
 
+#[allow(dead_code)]
 impl PrefixCache {
     pub fn new() -> Self {
         Self {

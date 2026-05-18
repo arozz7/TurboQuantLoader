@@ -8,6 +8,7 @@ use crate::config::{KvCacheConfig, ModelConfig};
 /// Passed as part of [`GenerateRequest`]. Phase 2 moves this to
 /// `inference/sampler.rs`; callers always import it from `model::backend`
 /// until that refactor.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SamplerParams {
     /// Softmax temperature — higher values increase randomness (default: `0.7`).
@@ -41,6 +42,7 @@ impl Default for SamplerParams {
 }
 
 /// A request to generate text from a prompt.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct GenerateRequest {
     /// Fully formatted prompt string (chat template applied by the caller).
@@ -87,6 +89,7 @@ pub type GenerateStream = mpsc::Receiver<GenerateEvent>;
 /// Implemented by [`LlamaCppBackend`] in Phase 2. All callers depend on this
 /// trait rather than on a concrete type, enabling backend swaps without
 /// cascading changes.
+#[allow(dead_code)]
 pub trait ModelBackend: Send + Sync {
     /// Load the model described by `config` and return a ready-to-use backend.
     ///

@@ -13,6 +13,7 @@ use super::{CacheStats, KvCacheBackend};
 /// ratio, and is updated via [`configure`](Self::configure) whenever the
 /// inference thread is reconfigured.
 pub struct LlamaNativeCache {
+    #[allow(dead_code)]
     bits: KvBits,
 }
 

@@ -432,7 +432,7 @@ fn cmd_list(config: &AppConfig) -> Result<()> {
     }
 
     println!("Found {} model(s) in: {}\n", entries.len(), dir.display());
-    println!("{:<60}  {:>10}  {}", "Name", "Size", "Flags");
+    println!("{:<60}  {:>10}  Flags", "Name", "Size");
     println!("{}", "-".repeat(80));
 
     for entry in &entries {

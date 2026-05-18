@@ -95,6 +95,7 @@ pub struct ContentBlock {
     #[serde(default)]
     pub text: String,
     /// Present on `tool_use` blocks — tool call identifier.
+    #[allow(dead_code)]
     #[serde(default)]
     pub id: String,
     /// Present on `tool_use` blocks — the tool name.
@@ -104,6 +105,7 @@ pub struct ContentBlock {
     #[serde(default)]
     pub input: serde_json::Value,
     /// Present on `tool_result` blocks — the id of the `tool_use` this answers.
+    #[allow(dead_code)]
     #[serde(default)]
     pub tool_use_id: String,
     /// Present on `tool_result` blocks — the result content (string or block array).
@@ -176,6 +178,7 @@ pub struct MessagesResponse {
 
 // ── Thinking block types ──────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct ThinkingBlockStartData {
     pub r#type: &'static str, // "thinking"
@@ -183,12 +186,14 @@ pub struct ThinkingBlockStartData {
     pub thinking: &'static str,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct ThinkingDelta {
     pub r#type: &'static str, // "thinking_delta"
     pub thinking: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct ContentBlockDeltaThinkingEvent {
     pub r#type: &'static str, // "content_block_delta"
@@ -198,6 +203,7 @@ pub struct ContentBlockDeltaThinkingEvent {
 
 // ── Tool use block types ──────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct ToolUseBlockStartData {
     pub r#type: &'static str, // "tool_use"

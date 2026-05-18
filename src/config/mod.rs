@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Loaded from `config.toml` via [`load_from_file`], then refined by
 /// [`AppConfig::apply_cli_overrides`] before use.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     /// HTTP server settings.
     #[serde(default)]
@@ -42,19 +42,6 @@ pub struct AppConfig {
     /// Log file output and retention settings.
     #[serde(default)]
     pub logging: LoggingConfig,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            server: ServerConfig::default(),
-            model: ModelConfig::default(),
-            kv_cache: KvCacheConfig::default(),
-            backend: BackendConfig::default(),
-            models: Vec::new(),
-            logging: LoggingConfig::default(),
-        }
-    }
 }
 
 impl AppConfig {
