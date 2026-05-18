@@ -45,10 +45,8 @@ impl AnthropicContent {
                 let mut parts = Vec::new();
                 for b in blocks {
                     match b.r#type.as_str() {
-                        "text" => {
-                            if !b.text.is_empty() {
-                                parts.push(b.text);
-                            }
+                        "text" if !b.text.is_empty() => {
+                            parts.push(b.text);
                         }
                         "tool_use" => {
                             let call = serde_json::json!({
