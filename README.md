@@ -15,9 +15,14 @@ scaffolding for Qwen3, and exposes Prometheus metrics + a hot-swap admin API.
 
 ## Status
 
-> **Phase 1 — Foundation & Config** (complete) — skeleton compiles, `list` command works
-> **Phase 2 — Inference Engine** (complete) — model loads on both GPUs, tokens stream, `run` command works
-> **Phase 6 — llama-server Subprocess Backend** (complete) — proxy mode, MTP speculative decoding, metrics API, hot-swap
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 1 | Foundation & Config | ✓ Complete |
+| 2 | Inference Engine | ✓ Complete |
+| 6 | llama-server Subprocess Backend | ✓ Complete |
+| 7 | Client-Driven Model Selection | ✓ Complete |
+| 8 | File Logging & API Instrumentation | ✓ Complete |
+| 9 | Conversation Logging (JSONL) | ✓ Complete |
 
 See [`docs/plan.md`](docs/plan.md) for the full phased implementation plan.
 
@@ -35,6 +40,12 @@ See [`docs/plan.md`](docs/plan.md) for the full phased implementation plan.
 | Admin API — hot-swap model, restart | 6 | Done |
 | Multi-GPU tensor split (Vulkan) | 6 | Done |
 | KV cache compression (4-bit, llama-native) | 6 | Done |
+| Dynamic model selection via `model` field | 7 | Done |
+| Named model registry (`[[models]]` in config) | 7 | Done |
+| Idle guard — prevents mid-session model switches | 7 | Done |
+| Daily rolling log files with retention cleanup | 8 | Done |
+| Structured per-request log events (tokens, TPS, TTFT) | 8 | Done |
+| Conversation logging — full prompt + response JSONL | 9 | Done |
 | Interactive terminal chat (`run` command) | 2 | Done |
 | GGUF model loading via llama-cpp-2 | 2 | Done (behind `llama-backend` feature) |
 | KV cache benchmarks | 3 | Planned |
@@ -164,21 +175,70 @@ cargo run --release --features cuda -- run
 
 ## Configuration Reference
 
-Key `config.toml` settings:
+Full `config.toml` settings:
+
+**`[server]`**
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `server.port` | `7432` | External API port |
-| `backend.binary_path` | — | Path to `llama-server` executable |
-| `backend.internal_port` | `7433` | Port llama-server listens on |
-| `backend.variant` | `llama_server` | `llama_server` or `turbo_quant` |
-| `backend.extra_flags` | `[]` | Extra CLI flags passed to llama-server |
-| `backend.restart_on_crash` | `true` | Auto-restart on subprocess crash |
-| `model.model_path` | — | Path to `.gguf` model file |
-| `model.main_gpu` | `1` | Primary GPU device index |
-| `model.tensor_split` | `[16.0, 32.0]` | VRAM split weights |
-| `model.context_size` | `262144` | Max context tokens |
-| `kv_cache.bits` | `4` | KV cache quantization bits (2/3/4/8) |
+| `port` | `7432` | External API port |
+| `host` | `127.0.0.1` | Bind address |
+| `max_concurrent_requests` | `4` | Request concurrency limit |
+| `request_timeout_secs` | `300` | Per-request timeout |
+
+**`[backend]`**
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `binary_path` | — | Path to `llama-server` executable |
+| `internal_port` | `7433` | Port llama-server listens on |
+| `variant` | `llama_server` | `llama_server` or `turbo_quant` |
+| `extra_flags` | `[]` | Extra CLI flags passed verbatim to llama-server |
+| `restart_on_crash` | `true` | Auto-restart subprocess on unexpected exit |
+| `startup_timeout_secs` | `180` | Max seconds to wait for llama-server `/health` |
+
+**`[model]`**
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `model_path` | — | Path to the default `.gguf` model file |
+| `models_dir` | `models` | Root directory scanned by the `list` command and model auto-discovery |
+| `main_gpu` | `-1` | Primary GPU device index (`-1` = auto) |
+| `tensor_split` | `[]` | Per-device VRAM weights for multi-GPU splitting |
+| `context_size` | `262144` | Max context window in tokens |
+| `batch_size` | `512` | Prompt evaluation batch size |
+| `threads` | half CPUs | CPU threads for non-GPU ops |
+| `n_gpu_layers` | `-1` | Layers offloaded to GPU (`-1` = all) |
+| `model_idle_timeout_secs` | `1800` | Seconds of inactivity before a client-requested model switch is allowed. Prevents mid-session reloads. Set `0` to disable. |
+
+**`[kv_cache]`**
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `bits` | `8` | KV cache quantization bits: `2`, `3`, `4`, or `8` |
+| `strategy` | `llama_native` | `llama_native` or `turbo_quant` |
+
+**`[logging]`**
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `log_dir` | `logs` | Directory for rolling log files (created if absent) |
+| `log_retention_days` | `7` | Delete log files older than N days at startup. `0` = keep forever. |
+| `file_log_level` | `info` | Log level for the file appender. Accepts `RUST_LOG` syntax. |
+| `stdout_log_level` | `info` | Log level for stdout. Overridden by `RUST_LOG` env var. |
+| `log_conversations` | `false` | When `true`, write full prompt + response to `conversations.<date>.jsonl`. |
+
+**`[[models]]`** (array — one entry per named model)
+
+| Setting | Required | Description |
+|---------|----------|-------------|
+| `name` | Yes | Short identifier used as the OpenAI `model` field |
+| `path` | Yes | Absolute path to the `.gguf` file |
+| `context_size` | No | Overrides `[model] context_size` for this model |
+| `n_gpu_layers` | No | Overrides `[model] n_gpu_layers` |
+| `main_gpu` | No | Overrides `[model] main_gpu` |
+| `batch_size` | No | Overrides `[model] batch_size` |
+| `tensor_split` | No | Overrides `[model] tensor_split` |
 
 ## API Endpoints
 
@@ -205,6 +265,112 @@ Key `config.toml` settings:
 | `GET` | `/v1/admin/status` | Subprocess PID, uptime, config snapshot |
 | `POST` | `/v1/admin/restart` | Gracefully restart the llama-server subprocess |
 | `POST` | `/v1/admin/load` | Hot-swap model: `{"model_path": "/path/to/new.gguf"}` |
+
+## Dynamic Model Selection
+
+Agents select a model by passing its name as the OpenAI `model` field in any request:
+
+```json
+{ "model": "Qwen3.6-27B-Q6_K", "messages": [...] }
+```
+
+### Name Resolution Order
+
+1. **Exact match** — `name` in `[[models]]` config array
+2. **Substring match** — any `[[models]]` entry whose `name` contains the requested string
+3. **File-stem scan** — walks `models_dir` looking for a `.gguf` whose filename contains the requested string
+4. **Fallback** — unknown name → serve with the currently loaded model (no switch)
+
+### Auto-Switch Flow
+
+When a recognized model name differs from the currently loaded one:
+
+1. Server returns **HTTP 503** with `Retry-After: 10` header immediately
+2. Background task kills the old llama-server, starts a new one with the resolved model's settings
+3. Client retries after 10 seconds — by then the new model is loaded and health-checked
+4. While switching, all requests return 503 until the new model passes `/health`
+
+### Idle Guard
+
+To prevent mid-session reloads when an agent sends a different `model` string across turns, client-requested switches are blocked if the model was used within the last `model_idle_timeout_secs` seconds (default: 30 minutes).
+
+```toml
+[model]
+model_idle_timeout_secs = 1800   # 30 minutes; set 0 to disable
+```
+
+The admin `POST /v1/admin/load` endpoint always bypasses the idle guard.
+
+---
+
+## Logging
+
+TurboQuantLoader writes two independent log streams, both configured under `[logging]` in `config.toml`.
+
+### Operational Log
+
+Daily-rolling plain-text log files in `log_dir` (default: `logs/`):
+
+```
+logs/turboquant.2025-05-17.log
+logs/turboquant.2025-05-18.log
+...
+```
+
+Each completed request emits a structured event with:
+
+| Field | Description |
+|-------|-------------|
+| `id` | Request UUID (correlates across log lines) |
+| `model` | Active model name |
+| `prompt_tokens` | Tokens in the prompt |
+| `completion_tokens` | Tokens generated |
+| `ttft_ms` | Time-to-first-token (ms) |
+| `generation_ms` | Total generation time |
+| `tps` | Tokens per second |
+| `finish_reason` | `stop`, `length`, or `tool_calls` |
+
+Log files older than `log_retention_days` are deleted at startup.
+
+### Conversation Log (JSONL)
+
+When `log_conversations = true`, each completed streaming request is appended as a JSON line to a separate daily file:
+
+```
+logs/conversations.2025-05-17.jsonl
+```
+
+**Record format:**
+```json
+{
+  "ts": "2025-05-17T10:23:45Z",
+  "id": "chatcmpl-abc123",
+  "model": "Qwen3.6-27B-Q4_K_S",
+  "protocol": "openai",
+  "stream": true,
+  "messages": [
+    {"role": "system", "content": "You are a helpful assistant..."},
+    {"role": "user", "content": "Explain transformer attention..."}
+  ],
+  "response": "The transformer attention mechanism works by...",
+  "prompt_tokens": 2048,
+  "completion_tokens": 312,
+  "tps": 17.1,
+  "finish_reason": "stop"
+}
+```
+
+`messages` contains the **prepared** messages (after tool injection into the system prompt), so the record reflects exactly what the model received.
+
+Enable in `config.toml`:
+```toml
+[logging]
+log_conversations = true
+```
+
+Errors in the logger (disk full, permission denied) are emitted as `WARN` events and never propagate to the inference path. Conversation files share the same `log_retention_days` cleanup sweep as the operational log.
+
+---
 
 ## Claude Code Integration
 

@@ -77,7 +77,7 @@ stdout_log_level     = "info"
 # When true, each completed request is appended as a JSON line to
 # logs/conversations.<YYYY-MM-DD>.jsonl — full prompt + response content.
 # Disable in production unless actively debugging agent behaviour.
-log_conversations    = false
+log_conversations    = true
 
 # ── Named model registry ──────────────────────────────────────────────────────
 # Agents select a model by passing its `name` as the OpenAI `model` field.
