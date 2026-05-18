@@ -142,7 +142,7 @@ pub struct MessagesRequest {
 }
 
 fn default_max_tokens() -> u32 {
-    2048
+    32768
 }
 
 // ── Non-streaming response ────────────────────────────────────────────────────
