@@ -1,4 +1,4 @@
-﻿//! Streaming token parser for Qwen3.5 special markup.
+//! Streaming token parser for Qwen3.5 special markup.
 //!
 //! Qwen3.5 embeds structured markers directly in the token stream:
 //!
@@ -34,7 +34,10 @@ pub enum ParsedEvent {
     /// `</think>` was detected â€” close the thinking block, open the text block.
     ThinkingEnd,
     /// A complete `<tool_call>` JSON object is ready.
-    ToolCallReady { name: String, arguments: serde_json::Value },
+    ToolCallReady {
+        name: String,
+        arguments: serde_json::Value,
+    },
 }
 
 /// Stateful parser that transforms a raw token stream into [`ParsedEvent`]s.
@@ -50,7 +53,10 @@ pub struct StreamParser {
 
 impl StreamParser {
     pub fn new() -> Self {
-        Self { state: State::Text, lookahead: String::new() }
+        Self {
+            state: State::Text,
+            lookahead: String::new(),
+        }
     }
 
     /// True if the parser is currently inside a thinking block.
@@ -115,9 +121,10 @@ impl StreamParser {
                         if !before.is_empty() {
                             events.push(ParsedEvent::TextToken(before));
                         }
-                        self.lookahead =
-                            self.lookahead[pos + "<tool_call>".len()..].to_string();
-                        self.state = State::ToolCall { buffer: String::new() };
+                        self.lookahead = self.lookahead[pos + "<tool_call>".len()..].to_string();
+                        self.state = State::ToolCall {
+                            buffer: String::new(),
+                        };
                     } else {
                         // No tag detected yet.  Keep LOOKAHEAD bytes buffered
                         // to handle tags that span token boundaries; emit the rest.
@@ -141,8 +148,7 @@ impl StreamParser {
                         if !thinking_text.is_empty() {
                             events.push(ParsedEvent::ThinkingToken(thinking_text));
                         }
-                        self.lookahead =
-                            self.lookahead[pos + "</think>".len()..].to_string();
+                        self.lookahead = self.lookahead[pos + "</think>".len()..].to_string();
                         self.state = State::Text;
                         events.push(ParsedEvent::ThinkingEnd);
                         // Continue processing remainder in Text state.
@@ -164,8 +170,7 @@ impl StreamParser {
                 State::ToolCall { .. } => {
                     if let Some(pos) = self.lookahead.find("</tool_call>") {
                         let json_fragment = self.lookahead[..pos].to_string();
-                        let remainder =
-                            self.lookahead[pos + "</tool_call>".len()..].to_string();
+                        let remainder = self.lookahead[pos + "</tool_call>".len()..].to_string();
                         self.lookahead = remainder;
 
                         let buffer = if let State::ToolCall { buffer } = &mut self.state {
@@ -210,22 +215,32 @@ impl Default for StreamParser {
 /// Try to parse a tool call JSON buffer into a [`ParsedEvent::ToolCallReady`].
 fn try_parse_tool_call(buf: &str) -> Option<ParsedEvent> {
     let trimmed = buf.trim();
-    
+
     // First try standard JSON
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
         if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
-            let mut arguments = v.get("arguments").or_else(|| v.get("parameters")).or_else(|| v.get("input")).cloned().unwrap_or_else(|| serde_json::json!({}));
+            let mut arguments = v
+                .get("arguments")
+                .or_else(|| v.get("parameters"))
+                .or_else(|| v.get("input"))
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
             if let Some(s) = arguments.as_str() {
-                if let Ok(p) = serde_json::from_str(s) { arguments = p; }
+                if let Ok(p) = serde_json::from_str(s) {
+                    arguments = p;
+                }
             }
             tracing::info!(tool_call_name = %name, args = %arguments, "Successfully parsed model tool call output");
-            return Some(ParsedEvent::ToolCallReady { name: name.to_string(), arguments });
+            return Some(ParsedEvent::ToolCallReady {
+                name: name.to_string(),
+                arguments,
+            });
         }
     }
-    
+
     // Fallback: Model hallucinated XML tags (e.g. <function_name>Write</function_name> or <Write>) OR produced invalid JSON structure
     let mut ext_name = None;
-    
+
     // Try to extract name from `"name": "bash"` directly
     if let Some(n_start) = buf.find(r#""name""#) {
         let rest = &buf[n_start + 6..];
@@ -235,7 +250,7 @@ fn try_parse_tool_call(buf: &str) -> Option<ParsedEvent> {
             }
         }
     }
-    
+
     if ext_name.is_none() {
         if let Some(start) = buf.find("<function_name>") {
             if let Some(end) = buf[start..].find("</function_name>") {
@@ -250,9 +265,9 @@ fn try_parse_tool_call(buf: &str) -> Option<ParsedEvent> {
             }
         }
     }
-    
+
     let name = ext_name?;
-    
+
     // Fallback extract JSON arguments object embedded anywhere inside the invalid object
     let mut arguments = serde_json::json!({});
     let mut search_idx = 0;
@@ -266,7 +281,10 @@ fn try_parse_tool_call(buf: &str) -> Option<ParsedEvent> {
                         if obj.contains_key("arguments") {
                             arguments = obj["arguments"].clone();
                             break;
-                        } else if obj.contains_key("name") && obj.len() <= 2 && !obj.contains_key("command") {
+                        } else if obj.contains_key("name")
+                            && obj.len() <= 2
+                            && !obj.contains_key("command")
+                        {
                             // Probably parsed the outer shell successfully but it didn't contain anything useful
                             // Just continue searching inner brackets!
                         } else {
@@ -280,7 +298,7 @@ fn try_parse_tool_call(buf: &str) -> Option<ParsedEvent> {
         }
         search_idx = abs_start + 1;
     }
-    
+
     tracing::info!(tool_call_name = %name, args = %arguments, "Successfully extracted fallback model tool call output");
     Some(ParsedEvent::ToolCallReady { name, arguments })
 }
@@ -319,7 +337,13 @@ mod tests {
         assert!(evts.iter().all(|e| matches!(e, ParsedEvent::TextToken(_))));
         let combined: String = evts
             .iter()
-            .filter_map(|e| if let ParsedEvent::TextToken(t) = e { Some(t.as_str()) } else { None })
+            .filter_map(|e| {
+                if let ParsedEvent::TextToken(t) = e {
+                    Some(t.as_str())
+                } else {
+                    None
+                }
+            })
             .collect();
         assert_eq!(combined, "Hello, world!");
     }
@@ -350,7 +374,9 @@ mod tests {
         // Split <think> across two tokens
         let evts = feed(&mut p, &["prefix<th", "ink>thought</think>suffix"]);
 
-        assert!(evts.iter().any(|e| matches!(e, ParsedEvent::ThinkingToken(_))));
+        assert!(evts
+            .iter()
+            .any(|e| matches!(e, ParsedEvent::ThinkingToken(_))));
         assert!(evts.iter().any(|e| *e == ParsedEvent::ThinkingEnd));
     }
 
@@ -366,7 +392,9 @@ mod tests {
             ],
         );
 
-        let tool_evt = evts.iter().find(|e| matches!(e, ParsedEvent::ToolCallReady { .. }));
+        let tool_evt = evts
+            .iter()
+            .find(|e| matches!(e, ParsedEvent::ToolCallReady { .. }));
         assert!(tool_evt.is_some());
         if let Some(ParsedEvent::ToolCallReady { name, arguments }) = tool_evt {
             assert_eq!(name, "Read");
@@ -382,4 +410,3 @@ mod tests {
         assert!(!evts.iter().any(|e| *e == ParsedEvent::ThinkingEnd));
     }
 }
-

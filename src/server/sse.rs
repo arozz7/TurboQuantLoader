@@ -23,9 +23,8 @@ pub fn sse_response(
 /// Panics if serialisation fails (only possible for non-serialisable types,
 /// which never appear here).
 pub fn data_event(value: &impl serde::Serialize) -> Event {
-    Event::default().data(
-        serde_json::to_string(value).expect("serialisation of SSE payload must not fail"),
-    )
+    Event::default()
+        .data(serde_json::to_string(value).expect("serialisation of SSE payload must not fail"))
 }
 
 /// Same as [`data_event`] but also sets the SSE `event:` name field.
@@ -59,7 +58,10 @@ pub fn thinking_delta_event(index: u32, thinking: String) -> Event {
         &ContentBlockDeltaThinkingEvent {
             r#type: "content_block_delta",
             index,
-            delta: ThinkingDelta { r#type: "thinking_delta", thinking },
+            delta: ThinkingDelta {
+                r#type: "thinking_delta",
+                thinking,
+            },
         },
     )
 }
@@ -89,7 +91,10 @@ pub fn input_json_delta_event(index: u32, partial_json: String) -> Event {
         &ContentBlockDeltaInputJsonEvent {
             r#type: "content_block_delta",
             index,
-            delta: InputJsonDelta { r#type: "input_json_delta", partial_json },
+            delta: InputJsonDelta {
+                r#type: "input_json_delta",
+                partial_json,
+            },
         },
     )
 }

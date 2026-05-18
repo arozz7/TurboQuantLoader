@@ -188,7 +188,11 @@ async fn cmd_run(config: AppConfig) -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("inference thread panicked: {e}"))??;
 
-    println!("Model ready: {} ({} ctx)\n", engine.model_name(), engine.context_size());
+    println!(
+        "Model ready: {} ({} ctx)\n",
+        engine.model_name(),
+        engine.context_size()
+    );
 
     let stdin = tokio::io::stdin();
     let mut lines = BufReader::new(stdin).lines();
@@ -212,7 +216,10 @@ async fn cmd_run(config: AppConfig) -> Result<()> {
             break;
         }
 
-        history.push(ChatMessage { role: "user".into(), content: line });
+        history.push(ChatMessage {
+            role: "user".into(),
+            content: line,
+        });
 
         let req = ChatRequest {
             messages: history.clone(),
@@ -248,7 +255,10 @@ async fn cmd_run(config: AppConfig) -> Result<()> {
             }
         }
 
-        history.push(ChatMessage { role: "assistant".into(), content: response });
+        history.push(ChatMessage {
+            role: "assistant".into(),
+            content: response,
+        });
         println!();
     }
 
@@ -327,15 +337,16 @@ async fn cmd_bench(config: AppConfig, args: BenchArgs) -> Result<()> {
     // ── Run combinations ──────────────────────────────────────────────────────
     for &ctx_size in &context_sizes {
         for &bits in &kv_bits_list {
-            let kv_cfg = KvCacheConfig { bits, ..KvCacheConfig::default() };
+            let kv_cfg = KvCacheConfig {
+                bits,
+                ..KvCacheConfig::default()
+            };
 
             // Reconfigure is blocking — move off the async executor.
             let reconf_result = {
                 let engine_ref = &engine;
                 let kv_cfg_ref = &kv_cfg;
-                tokio::task::block_in_place(|| {
-                    engine_ref.reconfigure_context(ctx_size, kv_cfg_ref)
-                })
+                tokio::task::block_in_place(|| engine_ref.reconfigure_context(ctx_size, kv_cfg_ref))
             };
             if let Err(e) = reconf_result {
                 eprintln!(
@@ -351,7 +362,10 @@ async fn cmd_bench(config: AppConfig, args: BenchArgs) -> Result<()> {
                     content: prompt.clone(),
                 }],
                 max_tokens: 256,
-                sampler: SamplerParams { temperature: 0.1, ..SamplerParams::default() },
+                sampler: SamplerParams {
+                    temperature: 0.1,
+                    ..SamplerParams::default()
+                },
             };
 
             let mut stream = engine.chat(req)?;
@@ -365,10 +379,7 @@ async fn cmd_bench(config: AppConfig, args: BenchArgs) -> Result<()> {
                         break;
                     }
                     Some(GenerateEvent::Error(e)) => {
-                        eprintln!(
-                            "  error ctx={ctx_size} bits={}: {e}",
-                            u8::from(bits)
-                        );
+                        eprintln!("  error ctx={ctx_size} bits={}: {e}", u8::from(bits));
                         break;
                     }
                     None => break,
@@ -466,12 +477,10 @@ fn init_tracing(cfg: &LoggingConfig) -> Result<WorkerGuard> {
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     // Stdout layer — colored, level from RUST_LOG or config.
-    let stdout_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&cfg.stdout_log_level));
+    let stdout_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.stdout_log_level));
 
-    let stdout_layer = fmt::layer()
-        .with_target(false)
-        .with_filter(stdout_filter);
+    let stdout_layer = fmt::layer().with_target(false).with_filter(stdout_filter);
 
     // File layer — no ANSI, full target path, independent level.
     let file_filter = EnvFilter::new(&cfg.file_log_level);
@@ -494,12 +503,16 @@ fn init_tracing(cfg: &LoggingConfig) -> Result<WorkerGuard> {
 /// `retention_days` days. Skips files it cannot stat or remove, logging a
 /// warning instead of aborting.
 fn cleanup_old_logs(log_dir: &PathBuf, retention_days: u32) {
-    let cutoff = match SystemTime::now().checked_sub(Duration::from_secs(u64::from(retention_days) * 86_400)) {
+    let cutoff = match SystemTime::now()
+        .checked_sub(Duration::from_secs(u64::from(retention_days) * 86_400))
+    {
         Some(t) => t,
         None => return,
     };
 
-    let Ok(entries) = std::fs::read_dir(log_dir) else { return };
+    let Ok(entries) = std::fs::read_dir(log_dir) else {
+        return;
+    };
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -520,7 +533,10 @@ fn cleanup_old_logs(log_dir: &PathBuf, retention_days: u32) {
 
         if modified < cutoff {
             if let Err(e) = std::fs::remove_file(&path) {
-                eprintln!("warn: could not remove old log file {}: {e}", path.display());
+                eprintln!(
+                    "warn: could not remove old log file {}: {e}",
+                    path.display()
+                );
             } else {
                 eprintln!("info: removed old log file: {}", path.display());
             }
@@ -546,4 +562,3 @@ fn format_size(bytes: u64) -> String {
         format!("{bytes} B")
     }
 }
-

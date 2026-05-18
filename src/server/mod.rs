@@ -199,7 +199,10 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         // ── Inference ─────────────────────────────────────────────────────────
         .route("/v1/models", get(routes::models::list_models))
-        .route("/v1/chat/completions", post(routes::openai::chat_completions))
+        .route(
+            "/v1/chat/completions",
+            post(routes::openai::chat_completions),
+        )
         .route("/v1/messages", post(routes::anthropic::create_message))
         // ── Observability ─────────────────────────────────────────────────────
         .route("/health", get(routes::metrics::health))
@@ -235,7 +238,11 @@ async fn crash_watchdog(state: AppState) {
         }
 
         // CAS switching false→true so request handlers return 503 + Retry-After.
-        if state.switching.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        if state
+            .switching
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
             continue;
         }
 
@@ -277,7 +284,10 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         .await
         .context("failed to start llama-server subprocess")?;
 
-    info!(internal_port = config.backend.internal_port, "llama-server ready; starting API server");
+    info!(
+        internal_port = config.backend.internal_port,
+        "llama-server ready; starting API server"
+    );
 
     let metrics = MetricsCollector::start();
 
@@ -288,7 +298,10 @@ pub async fn serve(config: AppConfig) -> Result<()> {
     .context("failed to create conversation logger")?;
 
     if conv_logger.is_enabled() {
-        info!("conversation logging enabled — writing to {}/conversations.<date>.jsonl", config.logging.log_dir.display());
+        info!(
+            "conversation logging enabled — writing to {}/conversations.<date>.jsonl",
+            config.logging.log_dir.display()
+        );
     }
 
     let state = AppState {

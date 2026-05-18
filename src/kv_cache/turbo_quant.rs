@@ -12,8 +12,8 @@ pub mod turbo_quant_impl {
     use tracing::warn;
 
     use crate::config::KvCacheConfig;
-    use crate::kv_cache::{CacheStats, KvCacheBackend};
     use crate::kv_cache::llama_native::LlamaNativeCache;
+    use crate::kv_cache::{CacheStats, KvCacheBackend};
 
     pub struct TurboQuantCache {
         inner: LlamaNativeCache,
@@ -21,7 +21,9 @@ pub mod turbo_quant_impl {
 
     impl TurboQuantCache {
         pub fn new() -> Self {
-            Self { inner: LlamaNativeCache::new() }
+            Self {
+                inner: LlamaNativeCache::new(),
+            }
         }
     }
 

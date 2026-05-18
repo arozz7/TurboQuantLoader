@@ -59,9 +59,7 @@ impl ModelRegistry {
                         0
                     });
 
-                let has_mmproj = mmproj_paths
-                    .iter()
-                    .any(|mp| mp.parent() == path.parent());
+                let has_mmproj = mmproj_paths.iter().any(|mp| mp.parent() == path.parent());
 
                 ModelEntry {
                     name,
@@ -80,7 +78,9 @@ impl ModelRegistry {
     /// Find the first entry whose name contains `query` (case-insensitive).
     pub fn find_by_name<'a>(entries: &'a [ModelEntry], query: &str) -> Option<&'a ModelEntry> {
         let lower = query.to_lowercase();
-        entries.iter().find(|e| e.name.to_lowercase().contains(&lower))
+        entries
+            .iter()
+            .find(|e| e.name.to_lowercase().contains(&lower))
     }
 
     /// Resolve a model `name` to a [`ModelDefinition`] using `config`.
@@ -94,12 +94,20 @@ impl ModelRegistry {
         let lower = name.to_lowercase();
 
         // 1. Exact name match in registry.
-        if let Some(def) = config.models.iter().find(|m| m.name.to_lowercase() == lower) {
+        if let Some(def) = config
+            .models
+            .iter()
+            .find(|m| m.name.to_lowercase() == lower)
+        {
             return Some(def.clone());
         }
 
         // 2. Substring match in registry.
-        if let Some(def) = config.models.iter().find(|m| m.name.to_lowercase().contains(&lower)) {
+        if let Some(def) = config
+            .models
+            .iter()
+            .find(|m| m.name.to_lowercase().contains(&lower))
+        {
             return Some(def.clone());
         }
 

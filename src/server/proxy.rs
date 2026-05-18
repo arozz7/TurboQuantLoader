@@ -68,9 +68,9 @@ pub async fn proxy_request(
         .unwrap_or_else(|| HeaderValue::from_static("application/json"));
 
     // Stream the response body — works for both JSON blobs and SSE streams.
-    let byte_stream = upstream.bytes_stream().map(|result| {
-        result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-    });
+    let byte_stream = upstream
+        .bytes_stream()
+        .map(|result| result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
     let body = Body::from_stream(byte_stream);
 
     let response = axum::response::Response::builder()
@@ -167,7 +167,11 @@ pub async fn spawn_event_reader(
                                 if completion_tokens == 0 {
                                     completion_tokens += 1;
                                 }
-                                if tx.send(GenerateEvent::Token(content.to_string())).await.is_err() {
+                                if tx
+                                    .send(GenerateEvent::Token(content.to_string()))
+                                    .await
+                                    .is_err()
+                                {
                                     return;
                                 }
                             }
@@ -214,8 +218,7 @@ pub async fn spawn_tracked_reader(
         let mut ttft_ms = 0u64;
         let mut counted_tokens = 0u32;
 
-        let mut stream =
-            tokio_stream::wrappers::ReceiverStream::new(inner_rx);
+        let mut stream = tokio_stream::wrappers::ReceiverStream::new(inner_rx);
 
         while let Some(event) = stream.next().await {
             match &event {

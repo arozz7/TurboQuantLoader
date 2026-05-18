@@ -24,7 +24,13 @@ impl AnthropicContent {
             Self::Text(s) => s,
             Self::Blocks(blocks) => blocks
                 .into_iter()
-                .filter_map(|b| if b.r#type == "text" { Some(b.text) } else { None })
+                .filter_map(|b| {
+                    if b.r#type == "text" {
+                        Some(b.text)
+                    } else {
+                        None
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(""),
         }
@@ -59,7 +65,9 @@ impl AnthropicContent {
                                     .iter()
                                     .filter_map(|v| {
                                         if v.get("type").and_then(|t| t.as_str()) == Some("text") {
-                                            v.get("text").and_then(|t| t.as_str()).map(str::to_string)
+                                            v.get("text")
+                                                .and_then(|t| t.as_str())
+                                                .map(str::to_string)
                                         } else {
                                             None
                                         }

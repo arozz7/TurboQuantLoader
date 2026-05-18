@@ -96,7 +96,10 @@ pub async fn create_message(
     let messages = to_openai_messages(&req);
     let log_messages: Vec<LogMessage> = messages
         .iter()
-        .map(|(role, content)| LogMessage { role: role.to_string(), content: content.clone() })
+        .map(|(role, content)| LogMessage {
+            role: role.to_string(),
+            content: content.clone(),
+        })
         .collect();
 
     let temperature = req.temperature.unwrap_or(0.6);
@@ -108,8 +111,15 @@ pub async fn create_message(
     if req.stream {
         let url = format!("{base_url}/v1/chat/completions");
         let body = build_chat_body(&messages, true, max_tokens, temperature, top_p, top_k);
-        let rx = spawn_tracked_reader(&http, &url, body, state.metrics.clone(), model_name.clone()).await?;
-        Ok(streaming_response(rx, model_name, request_id, log_messages, state.conv_logger.clone()))
+        let rx = spawn_tracked_reader(&http, &url, body, state.metrics.clone(), model_name.clone())
+            .await?;
+        Ok(streaming_response(
+            rx,
+            model_name,
+            request_id,
+            log_messages,
+            state.conv_logger.clone(),
+        ))
     } else {
         let url = format!("{base_url}/v1/chat/completions");
         let body = build_chat_body(&messages, false, max_tokens, temperature, top_p, top_k);
@@ -122,10 +132,9 @@ pub async fn create_message(
             .await
             .map_err(|e| ApiError::from(anyhow::anyhow!("upstream request failed: {e}")))?;
 
-        let json: serde_json::Value = upstream
-            .json()
-            .await
-            .map_err(|e| ApiError::from(anyhow::anyhow!("failed to parse upstream response: {e}")))?;
+        let json: serde_json::Value = upstream.json().await.map_err(|e| {
+            ApiError::from(anyhow::anyhow!("failed to parse upstream response: {e}"))
+        })?;
 
         let text = json["choices"][0]["message"]["content"]
             .as_str()
@@ -134,9 +143,17 @@ pub async fn create_message(
         let prompt_tokens = json["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32;
         let completion_tokens = json["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32;
 
-        tracing::info!(tokens = completion_tokens, "non-streaming response complete");
+        tracing::info!(
+            tokens = completion_tokens,
+            "non-streaming response complete"
+        );
 
-        Ok(full_response(text, prompt_tokens, completion_tokens, &model_name))
+        Ok(full_response(
+            text,
+            prompt_tokens,
+            completion_tokens,
+            &model_name,
+        ))
     }
 }
 
@@ -163,7 +180,11 @@ fn switching_503() -> Response {
 /// suitable for [`build_chat_body`], including Qwen3 tool injection in the
 /// system prompt.
 fn to_openai_messages(req: &MessagesRequest) -> Vec<(&'static str, String)> {
-    let system_text = req.system.clone().map(|s| s.into_text()).unwrap_or_default();
+    let system_text = req
+        .system
+        .clone()
+        .map(|s| s.into_text())
+        .unwrap_or_default();
     let system_content = if let Some(tools) = &req.tools {
         if tools.is_empty() {
             system_text
@@ -208,7 +229,10 @@ fn tools_to_qwen3_json(tools: &[serde_json::Value]) -> String {
         .iter()
         .map(|t| {
             let name = t.get("name").cloned().unwrap_or(serde_json::Value::Null);
-            let description = t.get("description").cloned().unwrap_or(serde_json::Value::Null);
+            let description = t
+                .get("description")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             let parameters = t
                 .get("input_schema")
                 .cloned()
@@ -228,21 +252,22 @@ fn tools_to_qwen3_json(tools: &[serde_json::Value]) -> String {
 
 // ── Non-streaming response ────────────────────────────────────────────────────
 
-fn full_response(
-    text: String,
-    prompt_tokens: u32,
-    output_tokens: u32,
-    model: &str,
-) -> Response {
+fn full_response(text: String, prompt_tokens: u32, output_tokens: u32, model: &str) -> Response {
     let resp = MessagesResponse {
         id: new_id("msg"),
         r#type: "message",
         role: "assistant",
-        content: vec![TextBlock { r#type: "text", text }],
+        content: vec![TextBlock {
+            r#type: "text",
+            text,
+        }],
         model: model.to_string(),
         stop_reason: "end_turn",
         stop_sequence: None,
-        usage: InputUsage { input_tokens: prompt_tokens, output_tokens },
+        usage: InputUsage {
+            input_tokens: prompt_tokens,
+            output_tokens,
+        },
     };
     Json(resp).into_response()
 }
@@ -274,7 +299,10 @@ fn streaming_response(
                         model,
                         stop_reason: None,
                         stop_sequence: None,
-                        usage: InputUsage { input_tokens: 0, output_tokens: 1 },
+                        usage: InputUsage {
+                            input_tokens: 0,
+                            output_tokens: 1,
+                        },
                     },
                 },
             )))
@@ -282,7 +310,11 @@ fn streaming_response(
         if ok.is_err() {
             return;
         }
-        if tx.send(Ok(named_event("ping", &PingEvent { r#type: "ping" }))).await.is_err() {
+        if tx
+            .send(Ok(named_event("ping", &PingEvent { r#type: "ping" })))
+            .await
+            .is_err()
+        {
             return;
         }
 
@@ -337,7 +369,9 @@ fn streaming_response(
 
                     let stop_reason = if tool_called { "tool_use" } else { "end_turn" };
 
-                    let prompt_tokens = summary.context_tokens.saturating_sub(summary.tokens_generated);
+                    let prompt_tokens = summary
+                        .context_tokens
+                        .saturating_sub(summary.tokens_generated);
                     conv_logger.log(&ConversationEntry {
                         ts: now_iso8601(),
                         id: request_id.clone(),
@@ -370,7 +404,9 @@ fn streaming_response(
                     let _ = tx
                         .send(Ok(named_event(
                             "message_stop",
-                            &MessageStopEvent { r#type: "message_stop" },
+                            &MessageStopEvent {
+                                r#type: "message_stop",
+                            },
                         )))
                         .await;
                     break;
@@ -405,7 +441,10 @@ async fn emit_parsed(
                         &ContentBlockStartEvent {
                             r#type: "content_block_start",
                             index: *block_index,
-                            content_block: ContentBlockStartData { r#type: "text", text: "" },
+                            content_block: ContentBlockStartData {
+                                r#type: "text",
+                                text: "",
+                            },
                         },
                     )))
                     .await
@@ -417,7 +456,10 @@ async fn emit_parsed(
                     &ContentBlockDeltaEvent {
                         r#type: "content_block_delta",
                         index: *block_index,
-                        delta: TextDelta { r#type: "text_delta", text: t },
+                        delta: TextDelta {
+                            r#type: "text_delta",
+                            text: t,
+                        },
                     },
                 )))
                 .await
@@ -435,7 +477,10 @@ async fn emit_parsed(
                         &ContentBlockStartEvent {
                             r#type: "content_block_start",
                             index: *block_index,
-                            content_block: ContentBlockStartData { r#type: "text", text: "" },
+                            content_block: ContentBlockStartData {
+                                r#type: "text",
+                                text: "",
+                            },
                         },
                     )))
                     .await
@@ -447,7 +492,10 @@ async fn emit_parsed(
                     &ContentBlockDeltaEvent {
                         r#type: "content_block_delta",
                         index: *block_index,
-                        delta: TextDelta { r#type: "text_delta", text: t },
+                        delta: TextDelta {
+                            r#type: "text_delta",
+                            text: t,
+                        },
                     },
                 )))
                 .await

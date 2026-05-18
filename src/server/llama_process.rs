@@ -55,7 +55,13 @@ impl LlamaProcess {
         let state = Arc::new(Mutex::new(ProcessState::Starting));
         let child = Arc::new(Mutex::new(None::<Child>));
 
-        let proc = LlamaProcess { config, state, child, health_client, proxy_client };
+        let proc = LlamaProcess {
+            config,
+            state,
+            child,
+            health_client,
+            proxy_client,
+        };
         proc.spawn_child().await?;
         proc.wait_until_ready().await?;
 
@@ -173,7 +179,12 @@ impl LlamaProcess {
         }
         let port = self.config.backend.internal_port;
         let url = format!("http://127.0.0.1:{port}/health");
-        self.health_client.get(&url).send().await.map(|r| r.status().is_success()).unwrap_or(false)
+        self.health_client
+            .get(&url)
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false)
     }
 
     /// Returns the OS PID of the subprocess, if running.
@@ -245,7 +256,10 @@ fn build_args(config: &AppConfig) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
 
     // Core model and network flags.
-    args.extend(["--model".into(), m.model_path.to_string_lossy().into_owned()]);
+    args.extend([
+        "--model".into(),
+        m.model_path.to_string_lossy().into_owned(),
+    ]);
     args.extend(["--host".into(), "127.0.0.1".into()]);
     args.extend(["--port".into(), b.internal_port.to_string()]);
 
@@ -255,7 +269,12 @@ fn build_args(config: &AppConfig) -> Vec<String> {
         args.extend(["--main-gpu".into(), m.main_gpu.to_string()]);
     }
     if !m.tensor_split.is_empty() && m.tensor_split != [1.0_f32] {
-        let split: String = m.tensor_split.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",");
+        let split: String = m
+            .tensor_split
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         args.extend(["--tensor-split".into(), split]);
     } else if m.main_gpu >= 0 {
         // If a main GPU is specified but no split weights are given, restrict the model entirely to the main GPU.
@@ -329,7 +348,9 @@ mod tests {
     fn build_args_includes_core_flags() {
         let cfg = test_config();
         let args = build_args(&cfg);
-        assert!(args.windows(2).any(|w| w == ["--model", "/models/test.gguf"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--model", "/models/test.gguf"]));
         assert!(args.windows(2).any(|w| w == ["--port", "7433"]));
         assert!(args.windows(2).any(|w| w == ["--n-gpu-layers", "-1"]));
         assert!(args.windows(2).any(|w| w == ["--ctx-size", "8192"]));

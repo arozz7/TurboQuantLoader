@@ -27,7 +27,11 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let (tps_p50, tps_p95, tps_p99) = state.metrics.tps_percentiles().await;
     let (ttft_p50, ttft_p95, ttft_p99) = state.metrics.ttft_percentiles().await;
 
-    let status = if backend_state == ProcessState::Ready { "ok" } else { "degraded" };
+    let status = if backend_state == ProcessState::Ready {
+        "ok"
+    } else {
+        "degraded"
+    };
 
     let model_name = cfg
         .model
@@ -80,8 +84,14 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
 
 /// `GET /metrics` — Prometheus text format exposition.
 pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoResponse {
-    let total_req = state.metrics.total_requests.load(std::sync::atomic::Ordering::Relaxed);
-    let total_err = state.metrics.total_errors.load(std::sync::atomic::Ordering::Relaxed);
+    let total_req = state
+        .metrics
+        .total_requests
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let total_err = state
+        .metrics
+        .total_errors
+        .load(std::sync::atomic::Ordering::Relaxed);
     let (tps_p50, tps_p95, tps_p99) = state.metrics.tps_percentiles().await;
     let (ttft_p50, ttft_p95, ttft_p99) = state.metrics.ttft_percentiles().await;
     let gpu_stats = state.metrics.gpu_stats.read().await.clone();
@@ -122,7 +132,10 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoRespo
 
     out.push_str("# HELP tql_uptime_seconds Server uptime in seconds\n");
     out.push_str("# TYPE tql_uptime_seconds counter\n");
-    out.push_str(&format!("tql_uptime_seconds {}\n\n", state.metrics.uptime_secs()));
+    out.push_str(&format!(
+        "tql_uptime_seconds {}\n\n",
+        state.metrics.uptime_secs()
+    ));
 
     if !gpu_stats.is_empty() {
         out.push_str("# HELP tql_gpu_vram_used_mb GPU VRAM used (MB)\n");
@@ -156,7 +169,13 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoRespo
         out.push('\n');
     }
 
-    ([(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")], out)
+    (
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        out,
+    )
 }
 
 // ── /v1/admin/stats ───────────────────────────────────────────────────────────

@@ -51,7 +51,10 @@ impl InferenceEngine {
         let backend = create_backend(&config)?;
         info!(model = backend.model_name(), "inference engine ready");
 
-        Ok(Self { backend, _kv_cache: kv_cache })
+        Ok(Self {
+            backend,
+            _kv_cache: kv_cache,
+        })
     }
 
     /// Begin generating the next assistant turn for `req`.
@@ -104,7 +107,10 @@ fn format_messages(messages: &[ChatMessage]) -> String {
     let mut out = String::new();
 
     // Prepend a default system prompt if the first message is not a system message.
-    let has_system = messages.first().map(|m| m.role == "system").unwrap_or(false);
+    let has_system = messages
+        .first()
+        .map(|m| m.role == "system")
+        .unwrap_or(false);
     if !has_system {
         out.push_str("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n");
     }
@@ -130,7 +136,10 @@ fn format_messages(messages: &[ChatMessage]) -> String {
 #[cfg(feature = "llama-backend")]
 fn create_backend(config: &AppConfig) -> Result<Box<dyn ModelBackend>> {
     use crate::model::llama_cpp::LlamaCppBackend;
-    Ok(Box::new(LlamaCppBackend::load_full(&config.model, &config.kv_cache)?))
+    Ok(Box::new(LlamaCppBackend::load_full(
+        &config.model,
+        &config.kv_cache,
+    )?))
 }
 
 #[cfg(not(feature = "llama-backend"))]

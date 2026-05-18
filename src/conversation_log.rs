@@ -71,7 +71,10 @@ impl ConversationLogger {
     /// file is opened or created.
     pub fn new(log_dir: PathBuf, enabled: bool) -> Result<Self> {
         if !enabled {
-            return Ok(Self { log_dir, inner: None });
+            return Ok(Self {
+                log_dir,
+                inner: None,
+            });
         }
 
         std::fs::create_dir_all(&log_dir)?;
@@ -80,7 +83,10 @@ impl ConversationLogger {
 
         Ok(Self {
             log_dir,
-            inner: Some(Mutex::new(LoggerInner { current_date: today, writer })),
+            inner: Some(Mutex::new(LoggerInner {
+                current_date: today,
+                writer,
+            })),
         })
     }
 

@@ -11,8 +11,8 @@ use axum::Json;
 use serde_json::{json, Value};
 
 use crate::model::registry::ModelRegistry;
-use crate::server::AppState;
 use crate::server::error::ApiError;
+use crate::server::AppState;
 
 /// `GET /v1/models`
 pub async fn list_models(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {

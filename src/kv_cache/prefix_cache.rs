@@ -20,7 +20,9 @@ pub struct PrefixCache {
 
 impl PrefixCache {
     pub fn new() -> Self {
-        Self { cached_tokens: Vec::new() }
+        Self {
+            cached_tokens: Vec::new(),
+        }
     }
 
     /// Returns how many leading tokens from `new_tokens` are already in the

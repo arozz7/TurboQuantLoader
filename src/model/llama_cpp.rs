@@ -23,7 +23,7 @@ use crate::config::{KvBits, KvCacheConfig, ModelConfig};
 use crate::inference::sampler::build_sampler;
 use crate::kv_cache::PrefixCache;
 use crate::model::backend::{
-    GenerateEvent, GenerateRequest, GenerateSummary, GenerateStream, ModelBackend,
+    GenerateEvent, GenerateRequest, GenerateStream, GenerateSummary, ModelBackend,
 };
 
 /// Buffer capacity for the per-request token event channel.
@@ -81,7 +81,9 @@ impl LlamaCppBackend {
         thread::Builder::new()
             .name("llama-inference".into())
             .spawn(move || {
-                if let Err(e) = inference_thread_main(&model_config, &kv_config, ready_tx.clone(), cmd_rx) {
+                if let Err(e) =
+                    inference_thread_main(&model_config, &kv_config, ready_tx.clone(), cmd_rx)
+                {
                     let _ = ready_tx.send(Err(e));
                 }
             })
@@ -92,7 +94,11 @@ impl LlamaCppBackend {
             .context("inference thread exited before signalling ready")??;
 
         info!(model = %model_name, context_size, "model loaded successfully");
-        Ok(Self { model_name, context_size: AtomicU32::new(context_size), cmd_tx })
+        Ok(Self {
+            model_name,
+            context_size: AtomicU32::new(context_size),
+            cmd_tx,
+        })
     }
 }
 
@@ -107,9 +113,11 @@ impl ModelBackend for LlamaCppBackend {
     /// adding a round-trip command for Phase 2.
     fn tokenize(&self, text: &str) -> Result<Vec<i32>> {
         // Rough estimate: ~1.3 tokens per whitespace word.
-        Ok((0..((text.split_whitespace().count() as f32 * 1.3) as usize))
-            .map(|i| i as i32)
-            .collect())
+        Ok(
+            (0..((text.split_whitespace().count() as f32 * 1.3) as usize))
+                .map(|i| i as i32)
+                .collect(),
+        )
     }
 
     fn detokenize(&self, tokens: &[i32]) -> Result<String> {
@@ -232,7 +240,11 @@ fn inference_thread_main(
                     let _ = event_tx.blocking_send(GenerateEvent::Error(e.to_string()));
                 }
             }
-            BackendCommand::ReconfigureContext { n_ctx, kv_config, result_tx } => {
+            BackendCommand::ReconfigureContext {
+                n_ctx,
+                kv_config,
+                result_tx,
+            } => {
                 let result = rebuild_context(&backend, &model, &config, n_ctx, &kv_config);
                 match result {
                     Ok(new_ctx) => {
@@ -276,7 +288,9 @@ fn rebuild_context<'a>(
         .with_n_threads_batch(config.threads as i32)
         .with_type_k(kv_type)
         .with_type_v(kv_type);
-    model.new_context(backend, ctx_params).context("failed to create llama context")
+    model
+        .new_context(backend, ctx_params)
+        .context("failed to create llama context")
 }
 
 // ── Generation ───────────────────────────────────────────────────────────────
@@ -309,11 +323,17 @@ fn do_generate(
     // the first generated token.
     let prompt_token_ids: Vec<i32> = prompt_tokens.iter().map(|t| t.0).collect();
     let raw_prefix = prefix_cache.common_prefix_len(&prompt_token_ids);
-    let n_past = raw_prefix.saturating_sub(1).min(prompt_len.saturating_sub(1));
+    let n_past = raw_prefix
+        .saturating_sub(1)
+        .min(prompt_len.saturating_sub(1));
 
     if n_past == 0 {
         ctx.clear_kv_cache();
-        debug!(prompt_tokens = prompt_len, n_past = 0, "prefill: cold cache");
+        debug!(
+            prompt_tokens = prompt_len,
+            n_past = 0,
+            "prefill: cold cache"
+        );
     } else {
         // Remove any stale KV entries that follow the reusable prefix
         // (e.g. tokens generated in the previous turn that are no longer
@@ -411,7 +431,10 @@ fn do_generate(
         // so blocking until the async consumer drains the channel is safe and
         // prevents the Done event from being lost when the GPU outpaces HTTP.
         if !emit_text.is_empty() {
-            if event_tx.blocking_send(GenerateEvent::Token(emit_text)).is_err() {
+            if event_tx
+                .blocking_send(GenerateEvent::Token(emit_text))
+                .is_err()
+            {
                 break;
             }
         }
@@ -424,7 +447,10 @@ fn do_generate(
         tokens_generated += 1;
 
         if tokens_generated % 20 == 0 {
-            info!("actively generating: {} tokens elapsed...", tokens_generated);
+            info!(
+                "actively generating: {} tokens elapsed...",
+                tokens_generated
+            );
         }
 
         // Decode the new token to update the KV cache.
@@ -433,7 +459,7 @@ fn do_generate(
             .add(token, pos, &[0], true)
             .context("failed to add generated token to batch")?;
         ctx.decode(&mut batch).context("per-token decode failed")?;
-        
+
         pos += 1;
     }
 
@@ -452,4 +478,3 @@ fn do_generate(
 
     Ok(())
 }
-

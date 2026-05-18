@@ -102,6 +102,5 @@ pub struct CliOverrides {
 pub fn load_from_file(path: &Path) -> Result<AppConfig> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read config file: {}", path.display()))?;
-    toml::from_str(&raw)
-        .with_context(|| format!("invalid TOML in config file: {}", path.display()))
+    toml::from_str(&raw).with_context(|| format!("invalid TOML in config file: {}", path.display()))
 }

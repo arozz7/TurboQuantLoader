@@ -41,7 +41,11 @@ pub async fn chat_completions(
         Ok(r) => r,
         Err(e) => {
             let body_str = String::from_utf8_lossy(&body);
-            tracing::error!("Failed to parse ChatCompletionRequest: {}\nRaw Body: {}", e, body_str);
+            tracing::error!(
+                "Failed to parse ChatCompletionRequest: {}\nRaw Body: {}",
+                e,
+                body_str
+            );
             return Err(anyhow::anyhow!("Invalid request: {}", e).into());
         }
     };
@@ -83,7 +87,10 @@ pub async fn chat_completions(
     // Build log-friendly message list from the prepared (tool-injected) messages.
     let log_messages: Vec<LogMessage> = messages
         .iter()
-        .map(|(role, content)| LogMessage { role: role.to_string(), content: content.clone() })
+        .map(|(role, content)| LogMessage {
+            role: role.to_string(),
+            content: content.clone(),
+        })
         .collect();
 
     if req.stream {
@@ -125,8 +132,12 @@ fn prepare_messages(req: &ChatCompletionRequest) -> Vec<(&'static str, String)> 
         .messages
         .iter()
         .map(|m| {
-            let mut text = m.content.as_ref().map(|c| c.clone().into_text()).unwrap_or_default();
-            
+            let mut text = m
+                .content
+                .as_ref()
+                .map(|c| c.clone().into_text())
+                .unwrap_or_default();
+
             if let Some(tool_calls) = &m.tool_calls {
                 for tc in tool_calls {
                     if let (Some(name), Some(args)) = (&tc.function.name, &tc.function.arguments) {
@@ -137,7 +148,7 @@ fn prepare_messages(req: &ChatCompletionRequest) -> Vec<(&'static str, String)> 
                     }
                 }
             }
-            
+
             (m.role.clone(), text)
         })
         .collect();
@@ -158,7 +169,10 @@ fn prepare_messages(req: &ChatCompletionRequest) -> Vec<(&'static str, String)> 
             } else {
                 messages.insert(
                     0,
-                    ("system".into(), format!("You are a helpful assistant.{injection}")),
+                    (
+                        "system".into(),
+                        format!("You are a helpful assistant.{injection}"),
+                    ),
                 );
             }
         }
@@ -214,8 +228,7 @@ fn streaming_response(
         let mut tool_called = false;
         let mut response_buf = String::new();
 
-        let emit_events = |events: Vec<ParsedEvent>,
-                           tx: &tokio::sync::mpsc::UnboundedSender<_>| {
+        let emit_events = |events: Vec<ParsedEvent>, tx: &tokio::sync::mpsc::UnboundedSender<_>| {
             for evt in events {
                 match evt {
                     ParsedEvent::TextToken(text) | ParsedEvent::ThinkingToken(text) => {
@@ -273,14 +286,20 @@ fn streaming_response(
                 GenerateEvent::Token(text) => {
                     response_buf.push_str(&text);
                     let evts = parser.push(&text);
-                    if evts.iter().any(|e| matches!(e, ParsedEvent::ToolCallReady { .. })) {
+                    if evts
+                        .iter()
+                        .any(|e| matches!(e, ParsedEvent::ToolCallReady { .. }))
+                    {
                         tool_called = true;
                     }
                     emit_events(evts, &tx);
                 }
                 GenerateEvent::Done(summary) => {
                     let evts = parser.flush();
-                    if evts.iter().any(|e| matches!(e, ParsedEvent::ToolCallReady { .. })) {
+                    if evts
+                        .iter()
+                        .any(|e| matches!(e, ParsedEvent::ToolCallReady { .. }))
+                    {
                         tool_called = true;
                     }
                     emit_events(evts, &tx);
@@ -295,7 +314,9 @@ fn streaming_response(
                         }
                     };
 
-                    let prompt_tokens = summary.context_tokens.saturating_sub(summary.tokens_generated);
+                    let prompt_tokens = summary
+                        .context_tokens
+                        .saturating_sub(summary.tokens_generated);
                     conv_logger.log(&ConversationEntry {
                         ts: now_iso8601(),
                         id: id.clone(),
@@ -317,7 +338,11 @@ fn streaming_response(
                         model: model_clone.clone(),
                         choices: vec![StreamChoice {
                             index: 0,
-                            delta: DeltaMessage { role: None, content: None, tool_calls: None },
+                            delta: DeltaMessage {
+                                role: None,
+                                content: None,
+                                tool_calls: None,
+                            },
                             finish_reason: Some(finish_reason),
                         }],
                     })));
@@ -378,8 +403,10 @@ async fn non_streaming_response(
                 .to_string();
             let prompt_tokens = v["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32;
             let completion_tokens = v["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32;
-            let finish_reason =
-                v["choices"][0]["finish_reason"].as_str().unwrap_or("stop").to_string();
+            let finish_reason = v["choices"][0]["finish_reason"]
+                .as_str()
+                .unwrap_or("stop")
+                .to_string();
 
             conv_logger.log(&ConversationEntry {
                 ts: now_iso8601(),
@@ -432,7 +459,10 @@ fn model_name_from_config(config: &crate::config::AppConfig) -> String {
 }
 
 fn unix_now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn new_id(prefix: &str) -> String {
