@@ -474,6 +474,7 @@ fn do_generate(
         tokens_generated,
         tokens_per_second: tps,
         context_tokens: prompt_len as u32 + tokens_generated,
+        finish_reason: "stop".to_string(),
     }));
 
     Ok(())
