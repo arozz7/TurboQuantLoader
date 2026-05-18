@@ -74,6 +74,10 @@ log_retention_days   = 7
 file_log_level       = "info"
 # Log level written to stdout. Overridden by RUST_LOG env var if set.
 stdout_log_level     = "info"
+# When true, each completed request is appended as a JSON line to
+# logs/conversations.<YYYY-MM-DD>.jsonl — full prompt + response content.
+# Disable in production unless actively debugging agent behaviour.
+log_conversations    = false
 
 # ── Named model registry ──────────────────────────────────────────────────────
 # Agents select a model by passing its `name` as the OpenAI `model` field.

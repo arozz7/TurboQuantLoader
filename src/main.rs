@@ -1,4 +1,5 @@
 mod config;
+mod conversation_log;
 mod gpu_stats;
 mod inference;
 mod kv_cache;

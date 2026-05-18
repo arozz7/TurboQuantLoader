@@ -32,6 +32,14 @@ pub struct LoggingConfig {
     /// Overridden by `RUST_LOG` if set. Defaults to `"info"`.
     #[serde(default = "default_stdout_log_level")]
     pub stdout_log_level: String,
+
+    /// When `true`, each completed inference request is appended as a JSON line
+    /// to `<log_dir>/conversations.<YYYY-MM-DD>.jsonl`, capturing the full
+    /// prompt messages and assembled response text.
+    ///
+    /// Disabled by default — enable for debugging agent interaction patterns.
+    #[serde(default)]
+    pub log_conversations: bool,
 }
 
 impl Default for LoggingConfig {
@@ -41,6 +49,7 @@ impl Default for LoggingConfig {
             log_retention_days: default_log_retention_days(),
             file_log_level: default_file_log_level(),
             stdout_log_level: default_stdout_log_level(),
+            log_conversations: false,
         }
     }
 }

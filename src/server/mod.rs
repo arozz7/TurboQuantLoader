@@ -33,6 +33,7 @@ use tokio::sync::RwLock;
 use tracing::info;
 
 use crate::config::AppConfig;
+use crate::conversation_log::ConversationLogger;
 use crate::metrics::MetricsCollector;
 use crate::model::registry::ModelRegistry;
 use llama_process::LlamaProcess;
@@ -59,6 +60,9 @@ pub struct AppState {
     /// Used by the idle guard in [`AppState::trigger_model_switch`]: a switch
     /// is blocked while the model has been active within `model_idle_timeout_secs`.
     pub last_request_at: Arc<Mutex<Instant>>,
+    /// Conversation logger — appends full prompt + response as JSON lines.
+    /// No-op when `log_conversations = false` in config.
+    pub conv_logger: Arc<ConversationLogger>,
 }
 
 impl AppState {
@@ -224,12 +228,23 @@ pub async fn serve(config: AppConfig) -> Result<()> {
 
     let metrics = MetricsCollector::start();
 
+    let conv_logger = ConversationLogger::new(
+        config.logging.log_dir.clone(),
+        config.logging.log_conversations,
+    )
+    .context("failed to create conversation logger")?;
+
+    if conv_logger.is_enabled() {
+        info!("conversation logging enabled — writing to {}/conversations.<date>.jsonl", config.logging.log_dir.display());
+    }
+
     let state = AppState {
         process: Arc::new(RwLock::new(Arc::new(process))),
         config: Arc::new(RwLock::new(config)),
         metrics,
         switching: Arc::new(AtomicBool::new(false)),
         last_request_at: Arc::new(Mutex::new(Instant::now())),
+        conv_logger: Arc::new(conv_logger),
     };
 
     let router = build_router(state);

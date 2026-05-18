@@ -4,9 +4,9 @@
 //! proxies to llama-server, and streams/collects the response.
 
 use std::convert::Infallible;
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -14,6 +14,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
+use crate::conversation_log::{now_iso8601, ConversationEntry, ConversationLogger, LogMessage};
 use crate::model::backend::GenerateEvent;
 use crate::model::registry::ModelRegistry;
 use crate::server::error::ApiError;
@@ -67,7 +68,10 @@ pub async fn chat_completions(
     let top_p = req.top_p.unwrap_or(0.95);
     let top_k = req.top_k.unwrap_or(20);
 
+    let request_id = new_id("chatcmpl");
+
     tracing::info!(
+        id = %request_id,
         model = %model_name,
         stream = req.stream,
         messages = req.messages.len(),
@@ -75,6 +79,12 @@ pub async fn chat_completions(
         max_tokens = req.max_tokens,
         "OpenAI chat request"
     );
+
+    // Build log-friendly message list from the prepared (tool-injected) messages.
+    let log_messages: Vec<LogMessage> = messages
+        .iter()
+        .map(|(role, content)| LogMessage { role: role.to_string(), content: content.clone() })
+        .collect();
 
     if req.stream {
         let body = build_chat_body(&messages, true, req.max_tokens, temperature, top_p, top_k);
@@ -86,7 +96,13 @@ pub async fn chat_completions(
             model_name.clone(),
         )
         .await?;
-        Ok(streaming_response(rx, model_name))
+        Ok(streaming_response(
+            rx,
+            model_name,
+            request_id,
+            log_messages,
+            state.conv_logger.clone(),
+        ))
     } else {
         let body = build_chat_body(&messages, false, req.max_tokens, temperature, top_p, top_k);
         // Non-streaming: transparent proxy — llama-server returns OpenAI JSON directly.
@@ -157,8 +173,13 @@ fn prepare_messages(req: &ChatCompletionRequest) -> Vec<(&'static str, String)> 
 
 // ── Streaming response ────────────────────────────────────────────────────────
 
-fn streaming_response(mut rx: crate::model::backend::GenerateStream, model: String) -> Response {
-    let id = new_id("chatcmpl");
+fn streaming_response(
+    mut rx: crate::model::backend::GenerateStream,
+    model: String,
+    id: String,
+    log_messages: Vec<LogMessage>,
+    conv_logger: Arc<ConversationLogger>,
+) -> Response {
     let created = unix_now();
     let model_clone = model.clone();
 
@@ -184,6 +205,7 @@ fn streaming_response(mut rx: crate::model::backend::GenerateStream, model: Stri
     tokio::spawn(async move {
         let mut parser = StreamParser::new();
         let mut tool_called = false;
+        let mut response_buf = String::new();
 
         let emit_events = |events: Vec<ParsedEvent>,
                            tx: &tokio::sync::mpsc::UnboundedSender<_>| {
@@ -242,6 +264,7 @@ fn streaming_response(mut rx: crate::model::backend::GenerateStream, model: Stri
         while let Some(event) = rx.recv().await {
             match event {
                 GenerateEvent::Token(text) => {
+                    response_buf.push_str(&text);
                     let evts = parser.push(&text);
                     if evts.iter().any(|e| matches!(e, ParsedEvent::ToolCallReady { .. })) {
                         tool_called = true;
@@ -255,16 +278,31 @@ fn streaming_response(mut rx: crate::model::backend::GenerateStream, model: Stri
                     }
                     emit_events(evts, &tx);
 
-                    let finish_reason = if tool_called { 
-                        "tool_calls" 
-                    } else { 
+                    let finish_reason = if tool_called {
+                        "tool_calls"
+                    } else {
                         match summary.finish_reason.as_str() {
                             "length" => "length",
                             "tool_calls" => "tool_calls",
                             _ => "stop",
                         }
                     };
-                    
+
+                    let prompt_tokens = summary.context_tokens.saturating_sub(summary.tokens_generated);
+                    conv_logger.log(&ConversationEntry {
+                        ts: now_iso8601(),
+                        id: id.clone(),
+                        model: model_clone.clone(),
+                        protocol: "openai",
+                        stream: true,
+                        messages: log_messages,
+                        response: response_buf,
+                        prompt_tokens,
+                        completion_tokens: summary.tokens_generated,
+                        tps: summary.tokens_per_second,
+                        finish_reason: finish_reason.to_string(),
+                    });
+
                     let _ = tx.send(Ok::<_, Infallible>(data_event(&ChatCompletionChunk {
                         id: id.clone(),
                         object: "chat.completion.chunk",

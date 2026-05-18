@@ -20,6 +20,7 @@
 
 use std::convert::Infallible;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -29,6 +30,7 @@ use axum::Json;
 use futures::StreamExt as _;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::conversation_log::{now_iso8601, ConversationEntry, ConversationLogger, LogMessage};
 use crate::model::backend::GenerateEvent;
 use crate::model::registry::ModelRegistry;
 use crate::server::error::ApiError;
@@ -79,8 +81,10 @@ pub async fn create_message(
     let msg_count = req.messages.len();
     let has_tools = req.tools.is_some();
     let max_tokens = req.max_tokens.min(4096);
+    let request_id = format!("msg_{}", uuid::Uuid::new_v4());
 
     tracing::info!(
+        id = %request_id,
         model = %model_name,
         stream = req.stream,
         messages = msg_count,
@@ -90,6 +94,11 @@ pub async fn create_message(
     );
 
     let messages = to_openai_messages(&req);
+    let log_messages: Vec<LogMessage> = messages
+        .iter()
+        .map(|(role, content)| LogMessage { role: role.to_string(), content: content.clone() })
+        .collect();
+
     let temperature = req.temperature.unwrap_or(0.6);
     let top_p = req.top_p.unwrap_or(0.95);
     let top_k = req.top_k.unwrap_or(20);
@@ -100,7 +109,7 @@ pub async fn create_message(
         let url = format!("{base_url}/v1/chat/completions");
         let body = build_chat_body(&messages, true, max_tokens, temperature, top_p, top_k);
         let rx = spawn_tracked_reader(&http, &url, body, state.metrics.clone(), model_name.clone()).await?;
-        Ok(streaming_response(rx, model_name))
+        Ok(streaming_response(rx, model_name, request_id, log_messages, state.conv_logger.clone()))
     } else {
         let url = format!("{base_url}/v1/chat/completions");
         let body = build_chat_body(&messages, false, max_tokens, temperature, top_p, top_k);
@@ -240,9 +249,15 @@ fn full_response(
 
 // ── Streaming response ────────────────────────────────────────────────────────
 
-fn streaming_response(rx: crate::model::backend::GenerateStream, model: String) -> Response {
-    let msg_id = new_id("msg");
+fn streaming_response(
+    rx: crate::model::backend::GenerateStream,
+    model: String,
+    request_id: String,
+    log_messages: Vec<LogMessage>,
+    conv_logger: Arc<ConversationLogger>,
+) -> Response {
     let (tx, output_rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(256);
+    let model_clone = model.clone();
 
     tokio::spawn(async move {
         // ── Preamble ──────────────────────────────────────────────────────────
@@ -252,7 +267,7 @@ fn streaming_response(rx: crate::model::backend::GenerateStream, model: String) 
                 &MessageStartEvent {
                     r#type: "message_start",
                     message: MessageStartData {
-                        id: msg_id,
+                        id: request_id.clone(),
                         r#type: "message",
                         role: "assistant",
                         content: vec![],
@@ -276,11 +291,13 @@ fn streaming_response(rx: crate::model::backend::GenerateStream, model: String) 
         let mut block_index: u32 = 0;
         let mut text_open = false;
         let mut tool_called = false;
+        let mut response_buf = String::new();
 
         let mut model_stream = ReceiverStream::new(rx);
         while let Some(model_event) = model_stream.next().await {
             match model_event {
                 GenerateEvent::Token(text) => {
+                    response_buf.push_str(&text);
                     let events = parser.push(&text);
                     if emit_parsed(
                         &tx,
@@ -319,6 +336,22 @@ fn streaming_response(rx: crate::model::backend::GenerateStream, model: String) 
                     }
 
                     let stop_reason = if tool_called { "tool_use" } else { "end_turn" };
+
+                    let prompt_tokens = summary.context_tokens.saturating_sub(summary.tokens_generated);
+                    conv_logger.log(&ConversationEntry {
+                        ts: now_iso8601(),
+                        id: request_id.clone(),
+                        model: model_clone.clone(),
+                        protocol: "anthropic",
+                        stream: true,
+                        messages: log_messages,
+                        response: response_buf,
+                        prompt_tokens,
+                        completion_tokens: summary.tokens_generated,
+                        tps: summary.tokens_per_second,
+                        finish_reason: stop_reason.to_string(),
+                    });
+
                     let _ = tx
                         .send(Ok(named_event(
                             "message_delta",
