@@ -18,7 +18,7 @@ use crate::conversation_log::{now_iso8601, ConversationEntry, ConversationLogger
 use crate::model::backend::GenerateEvent;
 use crate::model::registry::ModelRegistry;
 use crate::server::error::ApiError;
-use crate::server::proxy::{build_chat_body, proxy_request, spawn_tracked_reader};
+use crate::server::proxy::{build_chat_body, spawn_tracked_reader};
 use crate::server::sse::{data_event, sse_response};
 use crate::server::stream_parser::{ParsedEvent, StreamParser};
 use crate::server::types::openai::{
@@ -105,9 +105,16 @@ pub async fn chat_completions(
         ))
     } else {
         let body = build_chat_body(&messages, false, req.max_tokens, temperature, top_p, top_k);
-        // Non-streaming: transparent proxy — llama-server returns OpenAI JSON directly.
-        proxy_request(proc.http_client(), &proc.base_url(), "/v1/chat/completions", body, None)
-            .await
+        non_streaming_response(
+            proc.http_client(),
+            &url,
+            body,
+            request_id,
+            model_name,
+            log_messages,
+            state.conv_logger.clone(),
+        )
+        .await
     }
 }
 
@@ -328,6 +335,73 @@ fn streaming_response(
     });
 
     sse_response(UnboundedReceiverStream::new(sse_rx))
+}
+
+// ── Non-streaming response ────────────────────────────────────────────────────
+
+async fn non_streaming_response(
+    client: &reqwest::Client,
+    url: &str,
+    body: Vec<u8>,
+    request_id: String,
+    model_name: String,
+    log_messages: Vec<LogMessage>,
+    conv_logger: Arc<ConversationLogger>,
+) -> Result<Response, ApiError> {
+    let upstream = client
+        .post(url)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| ApiError::from(anyhow::anyhow!("upstream request failed: {e}")))?;
+
+    let status = StatusCode::from_u16(upstream.status().as_u16())
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let content_type = upstream
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+
+    let bytes = upstream
+        .bytes()
+        .await
+        .map_err(|e| ApiError::from(anyhow::anyhow!("failed to read upstream body: {e}")))?;
+
+    if status.is_success() {
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            let response_text = v["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            let prompt_tokens = v["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32;
+            let completion_tokens = v["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32;
+            let finish_reason =
+                v["choices"][0]["finish_reason"].as_str().unwrap_or("stop").to_string();
+
+            conv_logger.log(&ConversationEntry {
+                ts: now_iso8601(),
+                id: request_id,
+                model: model_name,
+                protocol: "openai",
+                stream: false,
+                messages: log_messages,
+                response: response_text,
+                prompt_tokens,
+                completion_tokens,
+                tps: 0.0,
+                finish_reason,
+            });
+        }
+    }
+
+    Ok(axum::response::Response::builder()
+        .status(status)
+        .header(axum::http::header::CONTENT_TYPE, content_type)
+        .body(axum::body::Body::from(bytes))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()))
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

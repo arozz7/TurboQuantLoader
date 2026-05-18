@@ -24,7 +24,7 @@ pub mod types;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use axum::routing::{get, post};
@@ -36,7 +36,7 @@ use crate::config::AppConfig;
 use crate::conversation_log::ConversationLogger;
 use crate::metrics::MetricsCollector;
 use crate::model::registry::ModelRegistry;
-use llama_process::LlamaProcess;
+use llama_process::{LlamaProcess, ProcessState};
 
 /// Shared state injected into every request handler via axum `State`.
 ///
@@ -212,10 +212,63 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Polls the subprocess state every 5 s and restarts it when a crash is detected.
+///
+/// Uses the same `switching` flag as model hot-swaps so in-flight and incoming
+/// requests receive clean 503 + Retry-After responses while the restart is in
+/// progress (up to 3 attempts, 15 s apart before giving up).
+async fn crash_watchdog(state: AppState) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(5));
+    ticker.tick().await; // skip the immediate first tick
+
+    loop {
+        ticker.tick().await;
+
+        // Don't interfere with an in-progress model switch or a prior restart.
+        if state.switching.load(Ordering::SeqCst) {
+            continue;
+        }
+
+        let proc = state.process_snapshot().await;
+        if proc.state().await != ProcessState::Crashed {
+            continue;
+        }
+
+        // CAS switching false→true so request handlers return 503 + Retry-After.
+        if state.switching.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            continue;
+        }
+
+        tracing::warn!("watchdog: llama-server crashed — restarting (503 gate open)");
+
+        let state_ref = state.clone();
+        tokio::spawn(async move {
+            for attempt in 1u32..=3 {
+                match proc.restart(None).await {
+                    Ok(()) => {
+                        tracing::info!(attempt, "watchdog: llama-server restarted successfully");
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, attempt, "watchdog: restart attempt failed");
+                        if attempt < 3 {
+                            tokio::time::sleep(Duration::from_secs(15)).await;
+                        } else {
+                            tracing::error!("watchdog: giving up after 3 restart attempts — server will remain unavailable");
+                        }
+                    }
+                }
+            }
+            state_ref.switching.store(false, Ordering::SeqCst);
+        });
+    }
+}
+
 /// Start the llama-server subprocess, build the router, and serve until interrupted.
 pub async fn serve(config: AppConfig) -> Result<()> {
     let host = config.server.host.clone();
     let port = config.server.port;
+    let restart_on_crash = config.backend.restart_on_crash;
 
     info!(host = %host, port, "starting TurboQuantLoader");
 
@@ -246,6 +299,10 @@ pub async fn serve(config: AppConfig) -> Result<()> {
         last_request_at: Arc::new(Mutex::new(Instant::now())),
         conv_logger: Arc::new(conv_logger),
     };
+
+    if restart_on_crash {
+        tokio::spawn(crash_watchdog(state.clone()));
+    }
 
     let router = build_router(state);
 
