@@ -6,7 +6,7 @@
 use std::convert::Infallible;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -15,6 +15,7 @@ use axum::Json;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::conversation_log::{now_iso8601, ConversationEntry, ConversationLogger, LogMessage};
+use crate::metrics::{MetricsCollector, RequestMetrics};
 use crate::model::backend::GenerateEvent;
 use crate::model::registry::ModelRegistry;
 use crate::server::error::ApiError;
@@ -116,10 +117,13 @@ pub async fn chat_completions(
             proc.http_client(),
             &url,
             body,
-            request_id,
-            model_name,
-            log_messages,
-            state.conv_logger.clone(),
+            NonStreamingArgs {
+                request_id,
+                model_name,
+                log_messages,
+                conv_logger: state.conv_logger.clone(),
+                metrics: state.metrics.clone(),
+            },
         )
         .await
     }
@@ -364,15 +368,32 @@ fn streaming_response(
 
 // ── Non-streaming response ────────────────────────────────────────────────────
 
-async fn non_streaming_response(
-    client: &reqwest::Client,
-    url: &str,
-    body: Vec<u8>,
+struct NonStreamingArgs {
     request_id: String,
     model_name: String,
     log_messages: Vec<LogMessage>,
     conv_logger: Arc<ConversationLogger>,
+    metrics: Arc<MetricsCollector>,
+}
+
+async fn non_streaming_response(
+    client: &reqwest::Client,
+    url: &str,
+    body: Vec<u8>,
+    args: NonStreamingArgs,
 ) -> Result<Response, ApiError> {
+    let NonStreamingArgs {
+        request_id,
+        model_name,
+        log_messages,
+        conv_logger,
+        metrics,
+    } = args;
+    let start = Instant::now();
+    metrics
+        .active_requests
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
     let upstream = client
         .post(url)
         .header("content-type", "application/json")
@@ -407,6 +428,12 @@ async fn non_streaming_response(
                 .as_str()
                 .unwrap_or("stop")
                 .to_string();
+            let generation_ms = start.elapsed().as_millis() as u64;
+            let tps = if generation_ms > 0 {
+                completion_tokens as f32 / (generation_ms as f32 / 1000.0)
+            } else {
+                0.0
+            };
 
             conv_logger.log(&ConversationEntry {
                 ts: now_iso8601(),
@@ -418,11 +445,29 @@ async fn non_streaming_response(
                 response: response_text,
                 prompt_tokens,
                 completion_tokens,
-                tps: 0.0,
-                finish_reason,
+                tps,
+                finish_reason: finish_reason.clone(),
             });
+
+            metrics.inc_requests();
+            metrics
+                .record(RequestMetrics {
+                    ttft_ms: generation_ms,
+                    generation_ms,
+                    tokens_per_second: tps,
+                    prompt_tokens,
+                    completion_tokens,
+                    finish_reason,
+                })
+                .await;
         }
+    } else {
+        metrics.inc_errors();
     }
+
+    metrics
+        .active_requests
+        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
 
     Ok(axum::response::Response::builder()
         .status(status)

@@ -5,7 +5,7 @@
 //! each streaming or non-streaming inference request completes.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,6 +26,8 @@ pub struct RequestMetrics {
     pub tokens_per_second: f32,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
+    /// Why generation stopped: `"stop"`, `"length"`, `"tool_calls"`.
+    pub finish_reason: String,
 }
 
 // ── Collector ─────────────────────────────────────────────────────────────────
@@ -34,6 +36,12 @@ pub struct RequestMetrics {
 pub struct MetricsCollector {
     pub total_requests: AtomicU64,
     pub total_errors: AtomicU64,
+    /// Cumulative tokens produced across all completed requests.
+    pub total_tokens_generated: AtomicU64,
+    /// Cumulative prompt tokens processed across all completed requests.
+    pub total_prompt_tokens: AtomicU64,
+    /// Number of requests currently in flight (generation in progress).
+    pub active_requests: AtomicI64,
     /// Last 100 completed requests.
     recent: RwLock<VecDeque<RequestMetrics>>,
     /// Latest GPU snapshot, refreshed every 2 s.
@@ -47,6 +55,9 @@ impl MetricsCollector {
         let collector = Arc::new(Self {
             total_requests: AtomicU64::new(0),
             total_errors: AtomicU64::new(0),
+            total_tokens_generated: AtomicU64::new(0),
+            total_prompt_tokens: AtomicU64::new(0),
+            active_requests: AtomicI64::new(0),
             recent: RwLock::new(VecDeque::with_capacity(100)),
             gpu_stats: RwLock::new(Vec::new()),
             started_at: Instant::now(),
@@ -73,6 +84,10 @@ impl MetricsCollector {
     }
 
     pub async fn record(&self, m: RequestMetrics) {
+        self.total_tokens_generated
+            .fetch_add(m.completion_tokens as u64, Ordering::Relaxed);
+        self.total_prompt_tokens
+            .fetch_add(m.prompt_tokens as u64, Ordering::Relaxed);
         let mut recent = self.recent.write().await;
         if recent.len() >= 100 {
             recent.pop_front();
@@ -104,6 +119,33 @@ impl MetricsCollector {
         let mut vals: Vec<u64> = recent.iter().map(|r| r.ttft_ms).collect();
         vals.sort_unstable();
         percentiles_u64(&vals)
+    }
+
+    /// p50 / p95 / p99 total generation time (ms) across the recent window.
+    pub async fn generation_ms_percentiles(&self) -> (u64, u64, u64) {
+        let recent = self.recent.read().await;
+        if recent.is_empty() {
+            return (0, 0, 0);
+        }
+        let mut vals: Vec<u64> = recent.iter().map(|r| r.generation_ms).collect();
+        vals.sort_unstable();
+        percentiles_u64(&vals)
+    }
+
+    /// Count of requests in the recent window that ended with each finish reason.
+    pub async fn finish_reason_counts(&self) -> (u64, u64, u64) {
+        let recent = self.recent.read().await;
+        let mut stop = 0u64;
+        let mut length = 0u64;
+        let mut tool_calls = 0u64;
+        for r in recent.iter() {
+            match r.finish_reason.as_str() {
+                "length" => length += 1,
+                "tool_calls" | "tool_use" => tool_calls += 1,
+                _ => stop += 1,
+            }
+        }
+        (stop, length, tool_calls)
     }
 
     /// Clone the recent window (for admin/stats JSON).

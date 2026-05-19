@@ -26,6 +26,8 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let gpu_stats = state.metrics.gpu_stats.read().await.clone();
     let (tps_p50, tps_p95, tps_p99) = state.metrics.tps_percentiles().await;
     let (ttft_p50, ttft_p95, ttft_p99) = state.metrics.ttft_percentiles().await;
+    let (gen_p50, gen_p95, gen_p99) = state.metrics.generation_ms_percentiles().await;
+    let (stop_count, length_count, tool_calls_count) = state.metrics.finish_reason_counts().await;
 
     let status = if backend_state == ProcessState::Ready {
         "ok"
@@ -67,6 +69,14 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
         "inference": {
             "total_requests": state.metrics.total_requests.load(std::sync::atomic::Ordering::Relaxed),
             "total_errors": state.metrics.total_errors.load(std::sync::atomic::Ordering::Relaxed),
+            "active_requests": state.metrics.active_requests.load(std::sync::atomic::Ordering::Relaxed),
+            "total_tokens_generated": state.metrics.total_tokens_generated.load(std::sync::atomic::Ordering::Relaxed),
+            "total_prompt_tokens": state.metrics.total_prompt_tokens.load(std::sync::atomic::Ordering::Relaxed),
+            "finish_reasons": {
+                "stop": stop_count,
+                "length": length_count,
+                "tool_calls": tool_calls_count,
+            },
         },
         "performance": {
             "tps_p50": tps_p50,
@@ -75,6 +85,9 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
             "ttft_p50_ms": ttft_p50,
             "ttft_p95_ms": ttft_p95,
             "ttft_p99_ms": ttft_p99,
+            "generation_p50_ms": gen_p50,
+            "generation_p95_ms": gen_p95,
+            "generation_p99_ms": gen_p99,
         },
         "gpus": gpus,
     }))
@@ -92,11 +105,25 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoRespo
         .metrics
         .total_errors
         .load(std::sync::atomic::Ordering::Relaxed);
+    let total_tokens = state
+        .metrics
+        .total_tokens_generated
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let total_prompt = state
+        .metrics
+        .total_prompt_tokens
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let active = state
+        .metrics
+        .active_requests
+        .load(std::sync::atomic::Ordering::Relaxed);
     let (tps_p50, tps_p95, tps_p99) = state.metrics.tps_percentiles().await;
     let (ttft_p50, ttft_p95, ttft_p99) = state.metrics.ttft_percentiles().await;
+    let (gen_p50, gen_p95, gen_p99) = state.metrics.generation_ms_percentiles().await;
+    let (stop_count, length_count, tool_calls_count) = state.metrics.finish_reason_counts().await;
     let gpu_stats = state.metrics.gpu_stats.read().await.clone();
 
-    let mut out = String::with_capacity(1024);
+    let mut out = String::with_capacity(2048);
 
     out.push_str("# HELP tql_requests_total Total inference requests received\n");
     out.push_str("# TYPE tql_requests_total counter\n");
@@ -105,6 +132,30 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoRespo
     out.push_str("# HELP tql_errors_total Total inference errors\n");
     out.push_str("# TYPE tql_errors_total counter\n");
     out.push_str(&format!("tql_errors_total {total_err}\n\n"));
+
+    out.push_str("# HELP tql_active_requests Requests currently in flight\n");
+    out.push_str("# TYPE tql_active_requests gauge\n");
+    out.push_str(&format!("tql_active_requests {active}\n\n"));
+
+    out.push_str("# HELP tql_tokens_generated_total Cumulative completion tokens produced\n");
+    out.push_str("# TYPE tql_tokens_generated_total counter\n");
+    out.push_str(&format!("tql_tokens_generated_total {total_tokens}\n\n"));
+
+    out.push_str("# HELP tql_prompt_tokens_total Cumulative prompt tokens processed\n");
+    out.push_str("# TYPE tql_prompt_tokens_total counter\n");
+    out.push_str(&format!("tql_prompt_tokens_total {total_prompt}\n\n"));
+
+    out.push_str("# HELP tql_finish_reason_total Requests by finish reason (recent window)\n");
+    out.push_str("# TYPE tql_finish_reason_total gauge\n");
+    out.push_str(&format!(
+        "tql_finish_reason_total{{reason=\"stop\"}} {stop_count}\n"
+    ));
+    out.push_str(&format!(
+        "tql_finish_reason_total{{reason=\"length\"}} {length_count}\n"
+    ));
+    out.push_str(&format!(
+        "tql_finish_reason_total{{reason=\"tool_calls\"}} {tool_calls_count}\n\n"
+    ));
 
     out.push_str("# HELP tql_tps_p50 Token generation throughput p50 (tokens/s)\n");
     out.push_str("# TYPE tql_tps_p50 gauge\n");
@@ -129,6 +180,18 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoRespo
     out.push_str("# HELP tql_ttft_p99_ms Time to first token p99 (ms)\n");
     out.push_str("# TYPE tql_ttft_p99_ms gauge\n");
     out.push_str(&format!("tql_ttft_p99_ms {ttft_p99}\n\n"));
+
+    out.push_str("# HELP tql_generation_p50_ms Total generation time p50 (ms)\n");
+    out.push_str("# TYPE tql_generation_p50_ms gauge\n");
+    out.push_str(&format!("tql_generation_p50_ms {gen_p50}\n\n"));
+
+    out.push_str("# HELP tql_generation_p95_ms Total generation time p95 (ms)\n");
+    out.push_str("# TYPE tql_generation_p95_ms gauge\n");
+    out.push_str(&format!("tql_generation_p95_ms {gen_p95}\n\n"));
+
+    out.push_str("# HELP tql_generation_p99_ms Total generation time p99 (ms)\n");
+    out.push_str("# TYPE tql_generation_p99_ms gauge\n");
+    out.push_str(&format!("tql_generation_p99_ms {gen_p99}\n\n"));
 
     out.push_str("# HELP tql_uptime_seconds Server uptime in seconds\n");
     out.push_str("# TYPE tql_uptime_seconds counter\n");
@@ -185,6 +248,8 @@ pub async fn admin_stats(State(state): State<AppState>) -> impl IntoResponse {
     let recent = state.metrics.recent_snapshot().await;
     let (tps_p50, tps_p95, tps_p99) = state.metrics.tps_percentiles().await;
     let (ttft_p50, ttft_p95, ttft_p99) = state.metrics.ttft_percentiles().await;
+    let (gen_p50, gen_p95, gen_p99) = state.metrics.generation_ms_percentiles().await;
+    let (stop_count, length_count, tool_calls_count) = state.metrics.finish_reason_counts().await;
 
     let requests: Vec<serde_json::Value> = recent
         .iter()
@@ -195,6 +260,7 @@ pub async fn admin_stats(State(state): State<AppState>) -> impl IntoResponse {
                 "tokens_per_second": r.tokens_per_second,
                 "prompt_tokens": r.prompt_tokens,
                 "completion_tokens": r.completion_tokens,
+                "finish_reason": r.finish_reason,
             })
         })
         .collect();
@@ -202,7 +268,15 @@ pub async fn admin_stats(State(state): State<AppState>) -> impl IntoResponse {
     Json(json!({
         "total_requests": state.metrics.total_requests.load(std::sync::atomic::Ordering::Relaxed),
         "total_errors": state.metrics.total_errors.load(std::sync::atomic::Ordering::Relaxed),
+        "active_requests": state.metrics.active_requests.load(std::sync::atomic::Ordering::Relaxed),
+        "total_tokens_generated": state.metrics.total_tokens_generated.load(std::sync::atomic::Ordering::Relaxed),
+        "total_prompt_tokens": state.metrics.total_prompt_tokens.load(std::sync::atomic::Ordering::Relaxed),
         "uptime_secs": state.metrics.uptime_secs(),
+        "finish_reasons": {
+            "stop": stop_count,
+            "length": length_count,
+            "tool_calls": tool_calls_count,
+        },
         "percentiles": {
             "tps_p50": tps_p50,
             "tps_p95": tps_p95,
@@ -210,6 +284,9 @@ pub async fn admin_stats(State(state): State<AppState>) -> impl IntoResponse {
             "ttft_p50_ms": ttft_p50,
             "ttft_p95_ms": ttft_p95,
             "ttft_p99_ms": ttft_p99,
+            "generation_p50_ms": gen_p50,
+            "generation_p95_ms": gen_p95,
+            "generation_p99_ms": gen_p99,
         },
         "recent_requests": requests,
     }))

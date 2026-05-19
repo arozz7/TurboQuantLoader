@@ -210,6 +210,10 @@ pub async fn spawn_tracked_reader(
     let (tx, rx) = mpsc::channel::<GenerateEvent>(256);
 
     tokio::spawn(async move {
+        metrics
+            .active_requests
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         let mut first_token = true;
         let mut ttft_ms = 0u64;
         let mut counted_tokens = 0u32;
@@ -258,6 +262,7 @@ pub async fn spawn_tracked_reader(
                             tokens_per_second: tps,
                             prompt_tokens: prompt,
                             completion_tokens: tokens,
+                            finish_reason: summary.finish_reason.clone(),
                         })
                         .await;
                 }
@@ -270,6 +275,10 @@ pub async fn spawn_tracked_reader(
                 break;
             }
         }
+
+        metrics
+            .active_requests
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     });
 
     Ok(rx)

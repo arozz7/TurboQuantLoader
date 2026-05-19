@@ -21,6 +21,7 @@
 use std::convert::Infallible;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -31,6 +32,7 @@ use futures::StreamExt as _;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::conversation_log::{now_iso8601, ConversationEntry, ConversationLogger, LogMessage};
+use crate::metrics::RequestMetrics;
 use crate::model::backend::GenerateEvent;
 use crate::model::registry::ModelRegistry;
 use crate::server::error::ApiError;
@@ -80,7 +82,7 @@ pub async fn create_message(
 
     let msg_count = req.messages.len();
     let has_tools = req.tools.is_some();
-    let max_tokens = req.max_tokens.min(4096);
+    let max_tokens = req.max_tokens;
     let request_id = format!("msg_{}", uuid::Uuid::new_v4());
 
     tracing::info!(
@@ -123,6 +125,11 @@ pub async fn create_message(
     } else {
         let url = format!("{base_url}/v1/chat/completions");
         let body = build_chat_body(&messages, false, max_tokens, temperature, top_p, top_k);
+        let start = Instant::now();
+        state
+            .metrics
+            .active_requests
+            .fetch_add(1, Ordering::Relaxed);
 
         let upstream = http
             .post(&url)
@@ -142,11 +149,53 @@ pub async fn create_message(
             .to_string();
         let prompt_tokens = json["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32;
         let completion_tokens = json["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32;
+        let finish_reason = json["choices"][0]["finish_reason"]
+            .as_str()
+            .unwrap_or("stop")
+            .to_string();
+        let generation_ms = start.elapsed().as_millis() as u64;
+        let tps = if generation_ms > 0 {
+            completion_tokens as f32 / (generation_ms as f32 / 1000.0)
+        } else {
+            0.0
+        };
 
         tracing::info!(
             tokens = completion_tokens,
+            finish_reason = %finish_reason,
             "non-streaming response complete"
         );
+
+        state.conv_logger.log(&ConversationEntry {
+            ts: now_iso8601(),
+            id: request_id,
+            model: model_name.clone(),
+            protocol: "anthropic",
+            stream: false,
+            messages: log_messages,
+            response: text.clone(),
+            prompt_tokens,
+            completion_tokens,
+            tps,
+            finish_reason: finish_reason.clone(),
+        });
+
+        state.metrics.inc_requests();
+        state
+            .metrics
+            .record(RequestMetrics {
+                ttft_ms: generation_ms,
+                generation_ms,
+                tokens_per_second: tps,
+                prompt_tokens,
+                completion_tokens,
+                finish_reason,
+            })
+            .await;
+        state
+            .metrics
+            .active_requests
+            .fetch_sub(1, Ordering::Relaxed);
 
         Ok(full_response(
             text,
