@@ -7,40 +7,106 @@ port                    = 7432
 max_concurrent_requests = 4
 request_timeout_secs    = 300
 
+[backend]
+# variant: "llama_server" (Vulkan build — primary) | "turbo_quant" (CUDA fork, NVIDIA only)
+variant              = "llama_server"
+binary_path          = "J:/llama/llama-server.exe"
+# Internal port: llama-server listens here; TurboQuantLoader proxies 7432 → 7433
+internal_port        = 7433
+startup_timeout_secs = 180
+restart_on_crash     = true
+# Extra CLI flags appended verbatim. Flash-attn enabled. (MTP speculative decoding disabled for Vulkan compatibility).
+extra_flags          = ["--flash-attn", "on", "--spec-type", "none"]
+
 [model]
 # ── Path configuration (platform-specific — override in config.local.toml) ───
-# Windows example (current dev machine):
-model_path   = "J:/llama/Models/unsloth/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-UD-IQ3_XXS.gguf"
+# Current dev machine (Windows):
+model_path   = "J:/llama/Models/unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q4_K_S.gguf"
 # macOS example:   model_path = "/Users/you/llama/Models/..."
 # Linux example:   model_path = "/home/you/llama/Models/..."
 # Env override:    TQL_MODEL_PATH=/path/to/model.gguf
 #
-# mmproj_path = "J:/llama/Models/unsloth/Qwen3.5-35B-A3B-GGUF/mmproj-F32.gguf"  # Phase 5 vision
+# mmproj_path = "J:/llama/Models/unsloth/Qwen3.6-27B-MTP-GGUF/mmproj-F32.gguf"  # vision
 
 models_dir   = "J:/llama/Models"   # root dir for `list` command; override per-platform
 
 # ── GPU configuration ─────────────────────────────────────────────────────────
-# n_gpu_layers: number of layers to offload to GPU (-1 = all layers)
-# Set to 0 for CPU-only inference on any platform.
+# n_gpu_layers: -1 = offload all layers to GPU
 n_gpu_layers = -1
 
-# tensor_split: proportional VRAM weights per GPU device (CUDA/Metal/Vulkan multi-GPU)
-# Windows dev machine: RTX 4070 Ti Super (16 GB) + RTX 2060 (6 GB)
-# Single GPU or CPU-only: tensor_split = [1.0]
-# macOS Apple Silicon (unified memory): tensor_split = [1.0]
-tensor_split = [16.0, 6.0]
+# main_gpu: index of the primary GPU device for llama-server --main-gpu
+# Device [1] = Intel Arc Pro B70 (32 GB VRAM, Vulkan) — primary inference target
+# Device [0] = NVIDIA RTX 4070 Ti Super (16 GB, CUDA+Vulkan) — overflow
+main_gpu = 1
 
-context_size = 8192             # tokens; increase to 32768+ once stable
-batch_size   = 512
-threads      = 8                # CPU threads for non-GPU ops; tune to your core count
+# tensor_split: only set this if you need to split across GPUs.
+# Qwen3.6-27B Q6_K (~22 GB) fits entirely on Arc B70 (32 GB) — no split needed.
+# If 262k context KV cache overflows Arc B70, uncomment and set weights:
+# tensor_split = [16.0, 32.0]
+
+# context_size: max supported by Qwen3.6 model
+context_size = 262144
+batch_size   = 4096
+threads      = 8    # CPU threads for non-GPU ops; tune to your core count
+
+# model_idle_timeout_secs: seconds of inactivity required before a client-requested
+# model switch is allowed. Prevents mid-session reloads when an agent sends a
+# different `model` string across turns. Set to 0 to disable.
+# Admin POST /v1/admin/load always bypasses this timeout.
+model_idle_timeout_secs = 1800   # 30 minutes
 
 [kv_cache]
 # bits: 2 | 3 | 4 | 8
 # 4-bit (Q4_0) = ~3.9x compression, near-zero quality loss — recommended default
-# 3-bit        = closest to true TurboQuant target; maps to Q4_0 until tq-kv supports Qwen3.5 MoE
-# 8-bit (Q8_0) = conservative option, ~2x compression
-bits             = 4
+bits             = 8
 # strategy: "llama_native" | "turbo_quant"
-# "turbo_quant" requires building with --features turbo-kv
 strategy         = "llama_native"
 # memory_budget_mb = 4096   # optional cap; omit for unlimited
+
+[logging]
+# Directory for rolling daily log files (relative to working dir, or absolute).
+# Created automatically if it does not exist.
+log_dir              = "logs"
+# Delete log files older than this many days at startup (0 = keep forever).
+log_retention_days   = 7
+# Log level written to the file. Independent of stdout level.
+# Accepts RUST_LOG syntax: "info", "debug", "turboquant_loader=debug,info", etc.
+file_log_level       = "info"
+# Log level written to stdout. Overridden by RUST_LOG env var if set.
+stdout_log_level     = "info"
+# When true, each completed request is appended as a JSON line to
+# logs/conversations.<YYYY-MM-DD>.jsonl — full prompt + response content.
+# Disable in production unless actively debugging agent behaviour.
+log_conversations    = true
+
+# ── Named model registry ──────────────────────────────────────────────────────
+# Agents select a model by passing its `name` as the OpenAI `model` field.
+# All fields except `name` and `path` are optional — absent values inherit the
+# corresponding [model] section defaults.
+#
+# Resolution order when a client sends `model: "some-name"`:
+#   1. Exact match on `name` below
+#   2. Substring match on `name` below
+#   3. File-stem substring scan of `models_dir`
+#   4. Unknown → serve with currently loaded model (no switch)
+
+[[models]]
+name          = "Qwen3.6-27b-Q4_K_S"
+path          = "J:/llama/Models/unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q4_K_S.gguf"
+context_size  = 262144
+n_gpu_layers  = -1
+main_gpu      = 1
+
+[[models]]
+name          = "Qwen3.6-27B-Q6_K"
+path          = "J:/llama/Models/unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q6_K.gguf"
+context_size  = 262144
+n_gpu_layers  = -1
+main_gpu      = 1
+
+# Example: add more models below as needed.
+# [[models]]
+# name         = "llama3-8b"
+# path         = "J:/llama/Models/Meta-Llama-3-8B-Instruct.Q5_K_M.gguf"
+# context_size = 8192
+# main_gpu     = 0

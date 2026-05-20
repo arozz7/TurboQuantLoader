@@ -55,6 +55,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install LLVM (provides libclang for bindgen)
+        run: brew install llvm
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -65,3 +67,5 @@ jobs:
           key: macos-metal-cargo-${{ hashFiles('**/Cargo.toml') }}
       - name: Cargo check (metal feature)
         run: cargo check --no-default-features --features metal
+        env:
+          LIBCLANG_PATH: /opt/homebrew/opt/llvm/lib

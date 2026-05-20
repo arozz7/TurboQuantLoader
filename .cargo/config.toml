@@ -4,13 +4,26 @@
 # Uncomment and set if your CUDA toolkit is not auto-detected:
 # rustflags = ["-C", "link-arg=-LC:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.x/lib/x64"]
 
+# NOTE: cmake.exe must be on your system PATH for --features cuda builds.
+# Add to Windows PATH permanently: C:\Program Files\CMake\bin
+# (cannot be set here — cargo [env] replaces PATH entirely rather than appending)
+
 [env]
-# Required by some llama.cpp build scripts on Windows.
-# Set to your LLVM/Clang installation if cargo build fails with libclang errors:
-# LIBCLANG_PATH = "C:/Program Files/LLVM/bin"
+# Required by llama-cpp-sys-2 (bindgen) to generate Rust bindings from C++ headers.
+# Points to the directory containing libclang.dll.
+LIBCLANG_PATH = "C:/Program Files/LLVM/bin"
+
+# Pin to CUDA 12.6 — CUDA 13.x PTX format requires a newer driver than the RTX 2060
+# supports. CMake picks up CUDA_PATH before searching PATH.
+CUDA_PATH = "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6"
 
 # Force CUDA device ordering to match physical slot order (slot 0 = 4070 Ti Super, slot 1 = 2060)
 CUDA_DEVICE_ORDER = "PCI_BUS_ID"
+
+# Single-GPU mode — faster for models ≤ 16 GB (pipeline parallelism overhead
+# exceeds the benefit of the 2060 for this model size).
+# Switch to CUDA_VISIBLE_DEVICES = "0,1" for models between 16–22 GB.
+CUDA_VISIBLE_DEVICES = "0"
 
 [target.x86_64-pc-windows-msvc]
 # MSVC linker — standard for Windows Rust + CUDA

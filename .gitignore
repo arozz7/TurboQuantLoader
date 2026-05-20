@@ -30,6 +30,8 @@ logs/
 .vscode/settings.json
 .vscode/launch.json
 *.iml
+.claude/
+.agent/
 
 # OS
 .DS_Store
