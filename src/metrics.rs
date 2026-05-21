@@ -40,6 +40,10 @@ pub struct MetricsCollector {
     pub total_tokens_generated: AtomicU64,
     /// Cumulative prompt tokens processed across all completed requests.
     pub total_prompt_tokens: AtomicU64,
+    /// Cumulative context tokens (prompt + completion) — used to derive average.
+    pub total_context_tokens: AtomicU64,
+    /// Largest single-request context (prompt + completion) ever seen.
+    pub max_context_tokens: AtomicU64,
     /// Number of requests currently in flight (generation in progress).
     pub active_requests: AtomicI64,
     /// Last 100 completed requests.
@@ -57,6 +61,8 @@ impl MetricsCollector {
             total_errors: AtomicU64::new(0),
             total_tokens_generated: AtomicU64::new(0),
             total_prompt_tokens: AtomicU64::new(0),
+            total_context_tokens: AtomicU64::new(0),
+            max_context_tokens: AtomicU64::new(0),
             active_requests: AtomicI64::new(0),
             recent: RwLock::new(VecDeque::with_capacity(100)),
             gpu_stats: RwLock::new(Vec::new()),
@@ -88,11 +94,27 @@ impl MetricsCollector {
             .fetch_add(m.completion_tokens as u64, Ordering::Relaxed);
         self.total_prompt_tokens
             .fetch_add(m.prompt_tokens as u64, Ordering::Relaxed);
+        let context = m.prompt_tokens as u64 + m.completion_tokens as u64;
+        self.total_context_tokens
+            .fetch_add(context, Ordering::Relaxed);
+        self.max_context_tokens
+            .fetch_max(context, Ordering::Relaxed);
         let mut recent = self.recent.write().await;
         if recent.len() >= 100 {
             recent.pop_front();
         }
         recent.push_back(m);
+    }
+
+    /// All-time average context size (prompt + completion tokens) per request.
+    pub fn avg_context_tokens(&self) -> f64 {
+        let total = self.total_context_tokens.load(Ordering::Relaxed);
+        let count = self.total_requests.load(Ordering::Relaxed);
+        if count == 0 {
+            0.0
+        } else {
+            total as f64 / count as f64
+        }
     }
 
     pub fn uptime_secs(&self) -> u64 {
@@ -128,6 +150,20 @@ impl MetricsCollector {
             return (0, 0, 0);
         }
         let mut vals: Vec<u64> = recent.iter().map(|r| r.generation_ms).collect();
+        vals.sort_unstable();
+        percentiles_u64(&vals)
+    }
+
+    /// p50 / p95 / p99 context size (prompt + completion tokens) across the recent window.
+    pub async fn context_size_percentiles(&self) -> (u64, u64, u64) {
+        let recent = self.recent.read().await;
+        if recent.is_empty() {
+            return (0, 0, 0);
+        }
+        let mut vals: Vec<u64> = recent
+            .iter()
+            .map(|r| r.prompt_tokens as u64 + r.completion_tokens as u64)
+            .collect();
         vals.sort_unstable();
         percentiles_u64(&vals)
     }
