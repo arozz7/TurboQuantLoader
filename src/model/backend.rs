@@ -77,6 +77,8 @@ pub struct GenerateSummary {
     pub context_tokens: u32,
     /// The reason generation stopped (e.g., "stop", "length").
     pub finish_reason: String,
+    /// Prompt tokens served from the KV prefix cache (0 if not reported by backend).
+    pub cached_tokens: u32,
 }
 
 /// Async channel receiver that delivers [`GenerateEvent`]s from the backend.

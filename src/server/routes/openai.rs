@@ -424,6 +424,10 @@ async fn non_streaming_response(
                 .to_string();
             let prompt_tokens = v["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32;
             let completion_tokens = v["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32;
+            let cached_tokens = v["usage"]["prompt_tokens_details"]["cached_tokens"]
+                .as_u64()
+                .or_else(|| v["usage"]["tokens_cached"].as_u64())
+                .unwrap_or(0) as u32;
             let finish_reason = v["choices"][0]["finish_reason"]
                 .as_str()
                 .unwrap_or("stop")
@@ -458,6 +462,7 @@ async fn non_streaming_response(
                     prompt_tokens,
                     completion_tokens,
                     finish_reason,
+                    cached_tokens,
                 })
                 .await;
         }

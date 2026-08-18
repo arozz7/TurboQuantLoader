@@ -119,6 +119,7 @@ pub async fn spawn_event_reader(
         let mut stream = response.bytes_stream();
         let mut completion_tokens: u32 = 0;
         let mut prompt_tokens: u32 = 0;
+        let mut cached_tokens: u32 = 0;
         let mut finish_reason_str = String::from("stop");
 
         while let Some(chunk) = stream.next().await {
@@ -153,6 +154,12 @@ pub async fn spawn_event_reader(
                     if let Some(usage) = v.get("usage").filter(|u| !u.is_null()) {
                         prompt_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0) as u32;
                         completion_tokens = usage["completion_tokens"].as_u64().unwrap_or(0) as u32;
+                        // llama.cpp ≥ b3900 reports cached tokens under prompt_tokens_details;
+                        // older builds may use the top-level tokens_cached field.
+                        cached_tokens = usage["prompt_tokens_details"]["cached_tokens"]
+                            .as_u64()
+                            .or_else(|| usage["tokens_cached"].as_u64())
+                            .unwrap_or(0) as u32;
                     }
 
                     if let Some(fr) = v["choices"][0]["finish_reason"].as_str() {
@@ -185,6 +192,7 @@ pub async fn spawn_event_reader(
                 context_tokens: prompt_tokens + completion_tokens,
                 tokens_per_second: 0.0,
                 finish_reason: finish_reason_str,
+                cached_tokens,
             }))
             .await;
     });
@@ -263,6 +271,7 @@ pub async fn spawn_tracked_reader(
                             prompt_tokens: prompt,
                             completion_tokens: tokens,
                             finish_reason: summary.finish_reason.clone(),
+                            cached_tokens: summary.cached_tokens,
                         })
                         .await;
                 }

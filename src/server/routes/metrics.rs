@@ -31,6 +31,9 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let (stop_count, length_count, tool_calls_count) = state.metrics.finish_reason_counts().await;
     let max_context = state.metrics.max_context_tokens.load(std::sync::atomic::Ordering::Relaxed);
     let avg_context = state.metrics.avg_context_tokens();
+    let total_cached = state.metrics.total_cached_tokens.load(std::sync::atomic::Ordering::Relaxed);
+    let total_prompt = state.metrics.total_prompt_tokens.load(std::sync::atomic::Ordering::Relaxed);
+    let cache_hit_rate = state.metrics.cache_hit_rate();
 
     let status = if backend_state == ProcessState::Ready {
         "ok"
@@ -99,6 +102,11 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
             "p95_tokens_recent": ctx_p95,
             "p99_tokens_recent": ctx_p99,
         },
+        "prompt_cache": {
+            "total_cached_tokens": total_cached,
+            "total_prompt_tokens": total_prompt,
+            "hit_rate_pct": (cache_hit_rate * 1000.0).round() / 10.0,
+        },
         "gpus": gpus,
     }))
 }
@@ -134,6 +142,8 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoRespo
     let (stop_count, length_count, tool_calls_count) = state.metrics.finish_reason_counts().await;
     let max_context = state.metrics.max_context_tokens.load(std::sync::atomic::Ordering::Relaxed);
     let avg_context = state.metrics.avg_context_tokens();
+    let total_cached = state.metrics.total_cached_tokens.load(std::sync::atomic::Ordering::Relaxed);
+    let cache_hit_rate = state.metrics.cache_hit_rate();
     let gpu_stats = state.metrics.gpu_stats.read().await.clone();
 
     let mut out = String::with_capacity(2048);
@@ -205,6 +215,14 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoRespo
     out.push_str("# HELP tql_generation_p99_ms Total generation time p99 (ms)\n");
     out.push_str("# TYPE tql_generation_p99_ms gauge\n");
     out.push_str(&format!("tql_generation_p99_ms {gen_p99}\n\n"));
+
+    out.push_str("# HELP tql_cached_tokens_total Cumulative prompt tokens served from KV prefix cache\n");
+    out.push_str("# TYPE tql_cached_tokens_total counter\n");
+    out.push_str(&format!("tql_cached_tokens_total {total_cached}\n\n"));
+
+    out.push_str("# HELP tql_cache_hit_rate Fraction of prompt tokens served from KV prefix cache (0.0-1.0)\n");
+    out.push_str("# TYPE tql_cache_hit_rate gauge\n");
+    out.push_str(&format!("tql_cache_hit_rate {cache_hit_rate:.4}\n\n"));
 
     out.push_str("# HELP tql_uptime_seconds Server uptime in seconds\n");
     out.push_str("# TYPE tql_uptime_seconds counter\n");
@@ -286,6 +304,8 @@ pub async fn admin_stats(State(state): State<AppState>) -> impl IntoResponse {
     let (stop_count, length_count, tool_calls_count) = state.metrics.finish_reason_counts().await;
     let max_context = state.metrics.max_context_tokens.load(std::sync::atomic::Ordering::Relaxed);
     let avg_context = state.metrics.avg_context_tokens();
+    let total_cached = state.metrics.total_cached_tokens.load(std::sync::atomic::Ordering::Relaxed);
+    let cache_hit_rate = state.metrics.cache_hit_rate();
 
     let requests: Vec<serde_json::Value> = recent
         .iter()
@@ -297,6 +317,7 @@ pub async fn admin_stats(State(state): State<AppState>) -> impl IntoResponse {
                 "prompt_tokens": r.prompt_tokens,
                 "completion_tokens": r.completion_tokens,
                 "context_tokens": r.prompt_tokens + r.completion_tokens,
+                "cached_tokens": r.cached_tokens,
                 "finish_reason": r.finish_reason,
             })
         })
@@ -320,6 +341,11 @@ pub async fn admin_stats(State(state): State<AppState>) -> impl IntoResponse {
             "p50_tokens_recent": ctx_p50,
             "p95_tokens_recent": ctx_p95,
             "p99_tokens_recent": ctx_p99,
+        },
+        "prompt_cache": {
+            "total_cached_tokens": total_cached,
+            "total_prompt_tokens": state.metrics.total_prompt_tokens.load(std::sync::atomic::Ordering::Relaxed),
+            "hit_rate_pct": (cache_hit_rate * 1000.0).round() / 10.0,
         },
         "percentiles": {
             "tps_p50": tps_p50,

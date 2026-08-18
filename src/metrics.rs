@@ -28,6 +28,8 @@ pub struct RequestMetrics {
     pub completion_tokens: u32,
     /// Why generation stopped: `"stop"`, `"length"`, `"tool_calls"`.
     pub finish_reason: String,
+    /// Prompt tokens served from the KV prefix cache for this request.
+    pub cached_tokens: u32,
 }
 
 // ── Collector ─────────────────────────────────────────────────────────────────
@@ -44,6 +46,8 @@ pub struct MetricsCollector {
     pub total_context_tokens: AtomicU64,
     /// Largest single-request context (prompt + completion) ever seen.
     pub max_context_tokens: AtomicU64,
+    /// Cumulative prompt tokens served from the KV prefix cache.
+    pub total_cached_tokens: AtomicU64,
     /// Number of requests currently in flight (generation in progress).
     pub active_requests: AtomicI64,
     /// Last 100 completed requests.
@@ -63,6 +67,7 @@ impl MetricsCollector {
             total_prompt_tokens: AtomicU64::new(0),
             total_context_tokens: AtomicU64::new(0),
             max_context_tokens: AtomicU64::new(0),
+            total_cached_tokens: AtomicU64::new(0),
             active_requests: AtomicI64::new(0),
             recent: RwLock::new(VecDeque::with_capacity(100)),
             gpu_stats: RwLock::new(Vec::new()),
@@ -94,6 +99,8 @@ impl MetricsCollector {
             .fetch_add(m.completion_tokens as u64, Ordering::Relaxed);
         self.total_prompt_tokens
             .fetch_add(m.prompt_tokens as u64, Ordering::Relaxed);
+        self.total_cached_tokens
+            .fetch_add(m.cached_tokens as u64, Ordering::Relaxed);
         let context = m.prompt_tokens as u64 + m.completion_tokens as u64;
         self.total_context_tokens
             .fetch_add(context, Ordering::Relaxed);
@@ -114,6 +121,17 @@ impl MetricsCollector {
             0.0
         } else {
             total as f64 / count as f64
+        }
+    }
+
+    /// Fraction of all prompt tokens served from the KV prefix cache (0.0–1.0).
+    pub fn cache_hit_rate(&self) -> f64 {
+        let cached = self.total_cached_tokens.load(Ordering::Relaxed);
+        let prompt = self.total_prompt_tokens.load(Ordering::Relaxed);
+        if prompt == 0 {
+            0.0
+        } else {
+            cached as f64 / prompt as f64
         }
     }
 
