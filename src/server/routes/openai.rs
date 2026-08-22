@@ -69,9 +69,10 @@ pub async fn chat_completions(
 
     let messages = prepare_messages(&req);
     let url = format!("{}/v1/chat/completions", proc.base_url());
-    let temperature = req.temperature.unwrap_or(0.6);
-    let top_p = req.top_p.unwrap_or(0.95);
+    let temperature = req.temperature.or(cfg.backend.temperature).unwrap_or(0.6);
+    let top_p = req.top_p.or(cfg.backend.top_p).unwrap_or(0.95);
     let top_k = req.top_k.unwrap_or(20);
+    let min_p = req.min_p.or(cfg.backend.min_p);
 
     let request_id = new_id("chatcmpl");
 
@@ -95,7 +96,15 @@ pub async fn chat_completions(
         .collect();
 
     if req.stream {
-        let body = build_chat_body(&messages, true, req.max_tokens, temperature, top_p, top_k);
+        let body = build_chat_body(
+            &messages,
+            true,
+            req.max_tokens,
+            temperature,
+            top_p,
+            top_k,
+            min_p,
+        );
         let rx = spawn_tracked_reader(
             proc.http_client(),
             &url,
@@ -112,7 +121,15 @@ pub async fn chat_completions(
             state.conv_logger.clone(),
         ))
     } else {
-        let body = build_chat_body(&messages, false, req.max_tokens, temperature, top_p, top_k);
+        let body = build_chat_body(
+            &messages,
+            false,
+            req.max_tokens,
+            temperature,
+            top_p,
+            top_k,
+            min_p,
+        );
         non_streaming_response(
             proc.http_client(),
             &url,

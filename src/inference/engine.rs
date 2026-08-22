@@ -85,7 +85,7 @@ impl InferenceEngine {
     /// Tear down and recreate the inference context with new parameters.
     ///
     /// Model weights remain loaded. Used by the `bench` command to sweep
-    /// (context_size × kv_bits) combinations without reloading the model.
+    /// (context_size × kv_type) combinations without reloading the model.
     pub fn reconfigure_context(&self, n_ctx: u32, kv_cfg: &KvCacheConfig) -> Result<()> {
         self.backend.reconfigure_context(n_ctx, kv_cfg)
     }

@@ -15,10 +15,31 @@ binary_path          = "J:/llama/llama-server.exe"
 internal_port        = 7433
 startup_timeout_secs = 180
 restart_on_crash     = true
-# Extra CLI flags appended verbatim. Flash-attn enabled. MTP speculative decoding
-# enabled (draft-mtp) — confirmed working on Vulkan with llama.cpp b10488+ against
-# Qwen3.8-27B's built-in nextn draft head (~77% draft acceptance rate observed).
-extra_flags          = ["--flash-attn", "on", "--spec-type", "draft-mtp", "--spec-draft-n-max", "2", "--parallel", "1"]
+# Global default speculative-decoding flags — confirmed working on Vulkan with
+# llama.cpp b10488+ against Qwen3.8-27B's built-in nextn draft head (~77% draft
+# acceptance rate observed). Override per-model via [models.load] for models
+# needing a different --spec-type (e.g. "draft-dspark" with an external
+# draft_model file, instead of the built-in MTP head).
+# spec_draft_n_max = 2 is Unsloth's documented sweet spot for draft-mtp
+# (acceptance rate drops 83%→50% at n_max=4) — see docs/models/qwen3.8.
+spec_type            = "draft-mtp"
+spec_draft_n_max     = 2
+
+# Sampling defaults for the active default model (Qwen3.8-27B, [model] section
+# below) — Unsloth's documented Thinking Mode values (docs/models/qwen3.8).
+# Qwen3.8 is a hybrid thinking model; reasoning_effort "xhigh" is used here
+# for coding/research prompting since the dual-GPU setup has headroom to
+# spare (options: xhigh | high | medium | low | none — lower = faster/shorter
+# reasoning traces). These are overridden per-model via [models.load]; they
+# only apply directly here because Qwen3.8 is loaded via [model] rather than
+# through the [[models]] registry.
+chat_template_kwargs = { reasoning_effort = "xhigh" }
+temperature          = 1.0
+top_p                = 0.95
+min_p                = 0.0
+
+# Extra CLI flags appended verbatim to every model, regardless of [models.load].
+extra_flags          = ["--flash-attn", "on", "--parallel", "2"]
 
 [model]
 # ── Path configuration (platform-specific — override in config.local.toml) ───
@@ -49,7 +70,9 @@ main_gpu = 1
 # tensor_split = [16.0, 32.0]
 
 # context_size: native window for Qwen3.8-27B (extensible to 1M if needed)
-context_size = 262144
+# Halved from 262144 to leave VRAM headroom while the full model sits on
+# the Arc B70 alone (RTX 4070 Ti Super currently idle, no tensor split).
+context_size = 131072
 batch_size   = 4096
 threads      = 8    # CPU threads for non-GPU ops; tune to your core count
 
@@ -60,9 +83,13 @@ threads      = 8    # CPU threads for non-GPU ops; tune to your core count
 model_idle_timeout_secs = 1800   # 30 minutes
 
 [kv_cache]
-# bits: 2 | 3 | 4 | 8
-# 4-bit (Q4_0) = ~3.9x compression, near-zero quality loss — recommended default
-bits             = 8
+# type_k / type_v: "f32" | "f16" | "bf16" | "q8_0" | "q4_0" | "q4_1" | "iq4_nl" | "q5_0" | "q5_1"
+# f16 = llama.cpp's own default, no quantization — set independently per
+# tensor since K (keys, used in attention score dot-products) is more
+# sensitive to quantization error than V (values). A common tuning step once
+# VRAM is tight: drop type_v to q8_0 or q4_0 before touching type_k.
+type_k           = "f16"
+type_v           = "f16"
 # strategy: "llama_native" | "turbo_quant"
 strategy         = "llama_native"
 # memory_budget_mb = 4096   # optional cap; omit for unlimited
@@ -94,19 +121,35 @@ log_conversations    = true
 #   3. File-stem substring scan of `models_dir`
 #   4. Unknown → serve with currently loaded model (no switch)
 
+# Qwen3.6 sampling below is Unsloth's documented "Precise Coding Tasks" row
+# (thinking mode) — lower temperature than the general-purpose thinking
+# defaults for tighter, more deterministic code/research output
+# (docs/models/qwen3.6). spec_type/spec_draft_n_max are omitted since they
+# match the [backend] globals above (draft-mtp, n_max 2) — no override needed.
+
 [[models]]
 name          = "Qwen3.6-27b-Q4_K_S"
 path          = "J:/llama/Models/unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q4_K_S.gguf"
-context_size  = 262144
+context_size  = 131072
 n_gpu_layers  = -1
 main_gpu      = 1
+[models.load]
+chat_template_kwargs = { enable_thinking = true }
+temperature           = 0.6
+top_p                 = 0.95
+min_p                 = 0.0
 
 [[models]]
 name          = "Qwen3.6-27B-Q6_K"
 path          = "J:/llama/Models/unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q6_K.gguf"
-context_size  = 262144
+context_size  = 131072
 n_gpu_layers  = -1
 main_gpu      = 1
+[models.load]
+chat_template_kwargs = { enable_thinking = true }
+temperature           = 0.6
+top_p                 = 0.95
+min_p                 = 0.0
 
 # Example: add more models below as needed.
 # [[models]]
@@ -114,3 +157,29 @@ main_gpu      = 1
 # path         = "J:/llama/Models/Meta-Llama-3-8B-Instruct.Q5_K_M.gguf"
 # context_size = 8192
 # main_gpu     = 0
+
+# DeepSeek-V4-Flash-0731 (UD-IQ3_XXS, ~104 GB across 4 shards) + DSpark drafter
+# (~10.9 GB) — external drafter instead of the built-in MTP head
+# (docs/models/deepseek-v4). `path` points at the first shard; llama-server
+# auto-loads the other 3 (…-00002-of-00004.gguf etc.) from the same directory.
+#
+# Weights (~104 GB) + drafter (~11 GB) exceed the 48 GB combined VRAM
+# (16 GB RTX 4070 Ti Super + 32 GB Arc B70), so most layers run on CPU —
+# this machine has 128 GB RAM, comfortably enough to hold the remainder.
+# n_gpu_layers below is a conservative starting point per the doc's own
+# example; raise it (watch llama-server's startup VRAM log) until GPU memory
+# is nearly exhausted, then leave headroom for the KV cache.
+[[models]]
+name         = "DeepSeek-V4-Flash-0731"
+path         = "J:/llama/Models/unsloth/DeepSeek-V4-Flash-0731-GGUF/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf"
+context_size = 131072   # doc default is 32768; raise as RAM allows (max 1,048,576)
+n_gpu_layers = 2        # doc's conservative example — tune upward once loaded once and VRAM headroom is known
+tensor_split = [16.0, 32.0]   # split offloaded layers across both GPUs by VRAM weight
+[models.load]
+spec_type             = "draft-dspark"
+spec_draft_n_max      = 3   # doc-recommended default — ~1.9x faster inference
+draft_model           = "J:/llama/Models/unsloth/DeepSeek-V4-Flash-0731-GGUF/dspark-DeepSeek-V4-Flash-0731-Q8_0.gguf"
+temperature            = 1.0
+top_p                  = 0.95   # doc's agentic/coding value (0.95) over the standard 1.0, for coding/research use
+min_p                  = 0.01
+chat_template_kwargs   = { reasoning_effort = "high" }   # "max" for deepest reasoning; "high" ("Think High") is the doc default

@@ -304,13 +304,14 @@ pub fn build_chat_body(
     temperature: f32,
     top_p: f32,
     top_k: u32,
+    min_p: Option<f32>,
 ) -> Vec<u8> {
     let msgs: Vec<serde_json::Value> = messages
         .iter()
         .map(|(role, content)| serde_json::json!({"role": role, "content": content}))
         .collect();
 
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": "local",
         "messages": msgs,
         "stream": stream,
@@ -320,6 +321,10 @@ pub fn build_chat_body(
         "top_k": top_k,
         "stream_options": {"include_usage": true},
     });
+
+    if let Some(min_p) = min_p {
+        body["min_p"] = serde_json::json!(min_p);
+    }
 
     serde_json::to_vec(&body).unwrap_or_default()
 }

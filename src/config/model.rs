@@ -22,6 +22,39 @@ pub struct ModelDefinition {
     pub batch_size: Option<u32>,
     /// Override tensor split weights (one float per device).
     pub tensor_split: Option<Vec<f32>>,
+    /// Load-time and sampling overrides for this model (speculative decoding,
+    /// chat-template kwargs, default sampling params). Absent fields fall back
+    /// to the corresponding `[backend]` section defaults.
+    #[serde(default)]
+    pub load: Option<LoadConfig>,
+}
+
+/// Per-model load-time and sampling overrides.
+///
+/// Speculative decoding is fundamentally per-model — a model with a built-in
+/// draft head (`draft-mtp`) needs no extra file, while a model needing an
+/// external drafter (`draft-dspark`) needs `draft_model` set too. All fields
+/// are optional; `None` falls back to the corresponding `[backend]` global.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LoadConfig {
+    /// `--spec-type` value (e.g. `"draft-mtp"`, `"draft-dspark"`).
+    pub spec_type: Option<String>,
+    /// `--spec-draft-n-max` value.
+    pub spec_draft_n_max: Option<usize>,
+    /// `--spec-draft-model` path, for architectures using an external drafter.
+    pub draft_model: Option<PathBuf>,
+    /// `--chat-template-kwargs` value, serialized to JSON.
+    pub chat_template_kwargs: Option<serde_json::Value>,
+    /// Default sampling temperature for this model.
+    pub temperature: Option<f32>,
+    /// Default nucleus sampling (`top_p`) for this model.
+    pub top_p: Option<f32>,
+    /// Default `min_p` for this model.
+    pub min_p: Option<f32>,
+    /// Escape hatch: verbatim CLI flags appended after the typed flags above,
+    /// on top of the global `[backend] extra_flags`.
+    #[serde(default)]
+    pub extra_flags: Vec<String>,
 }
 
 /// Model loading and inference configuration.

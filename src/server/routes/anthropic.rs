@@ -104,15 +104,16 @@ pub async fn create_message(
         })
         .collect();
 
-    let temperature = req.temperature.unwrap_or(0.6);
-    let top_p = req.top_p.unwrap_or(0.95);
+    let temperature = req.temperature.or(cfg.backend.temperature).unwrap_or(0.6);
+    let top_p = req.top_p.or(cfg.backend.top_p).unwrap_or(0.95);
     let top_k = req.top_k.unwrap_or(20);
+    let min_p = req.min_p.or(cfg.backend.min_p);
     let base_url = proc.base_url();
     let http = proc.http_client().clone();
 
     if req.stream {
         let url = format!("{base_url}/v1/chat/completions");
-        let body = build_chat_body(&messages, true, max_tokens, temperature, top_p, top_k);
+        let body = build_chat_body(&messages, true, max_tokens, temperature, top_p, top_k, min_p);
         let rx = spawn_tracked_reader(&http, &url, body, state.metrics.clone(), model_name.clone())
             .await?;
         Ok(streaming_response(
@@ -124,7 +125,7 @@ pub async fn create_message(
         ))
     } else {
         let url = format!("{base_url}/v1/chat/completions");
-        let body = build_chat_body(&messages, false, max_tokens, temperature, top_p, top_k);
+        let body = build_chat_body(&messages, false, max_tokens, temperature, top_p, top_k, min_p);
         let start = Instant::now();
         state
             .metrics

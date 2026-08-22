@@ -5,9 +5,9 @@ mod model;
 mod server;
 
 pub use backend::{BackendConfig, BackendVariant};
-pub use kv_cache::{KvBits, KvCacheConfig, KvStrategy};
+pub use kv_cache::{KvCacheConfig, KvStrategy, KvType};
 pub use logging::LoggingConfig;
-pub use model::{ModelConfig, ModelDefinition};
+pub use model::{LoadConfig, ModelConfig, ModelDefinition};
 pub use server::ServerConfig;
 
 use std::path::Path;
@@ -59,8 +59,11 @@ impl AppConfig {
         if let Some(layers) = overrides.n_gpu_layers {
             self.model.n_gpu_layers = layers;
         }
-        if let Some(bits) = overrides.kv_bits {
-            self.kv_cache.bits = bits;
+        if let Some(type_k) = overrides.kv_type_k {
+            self.kv_cache.type_k = type_k;
+        }
+        if let Some(type_v) = overrides.kv_type_v {
+            self.kv_cache.type_v = type_v;
         }
     }
 }
@@ -78,8 +81,10 @@ pub struct CliOverrides {
     pub context_size: Option<u32>,
     /// Override `[model] n_gpu_layers`.
     pub n_gpu_layers: Option<i32>,
-    /// Override `[kv_cache] bits`.
-    pub kv_bits: Option<KvBits>,
+    /// Override `[kv_cache] type_k`.
+    pub kv_type_k: Option<KvType>,
+    /// Override `[kv_cache] type_v`.
+    pub kv_type_v: Option<KvType>,
 }
 
 /// Load [`AppConfig`] from a TOML file at `path`.

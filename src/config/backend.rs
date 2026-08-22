@@ -30,9 +30,49 @@ pub struct BackendConfig {
     /// Automatically respawn the subprocess if it exits unexpectedly.
     #[serde(default = "default_true")]
     pub restart_on_crash: bool,
+    /// Global default `--spec-type` value (e.g. `"draft-mtp"`, `"draft-dspark"`).
+    ///
+    /// Overridden per-model via `[models.load] spec_type`.
+    #[serde(default)]
+    pub spec_type: Option<String>,
+    /// Global default `--spec-draft-n-max` value.
+    ///
+    /// Overridden per-model via `[models.load] spec_draft_n_max`.
+    #[serde(default)]
+    pub spec_draft_n_max: Option<usize>,
+    /// Global default `--spec-draft-model` path, for architectures using an
+    /// external drafter GGUF (e.g. DeepSeek's DSpark drafter).
+    ///
+    /// Overridden per-model via `[models.load] draft_model`.
+    #[serde(default)]
+    pub draft_model: Option<PathBuf>,
+    /// Global default `--chat-template-kwargs` value, serialized to JSON.
+    ///
+    /// Overridden per-model via `[models.load] chat_template_kwargs`.
+    #[serde(default)]
+    pub chat_template_kwargs: Option<serde_json::Value>,
+    /// Global default sampling temperature, used by request handlers as a
+    /// fallback when neither the client request nor the model's `load`
+    /// section specify one.
+    ///
+    /// Overridden per-model via `[models.load] temperature`.
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    /// Global default nucleus sampling (`top_p`).
+    ///
+    /// Overridden per-model via `[models.load] top_p`.
+    #[serde(default)]
+    pub top_p: Option<f32>,
+    /// Global default `min_p`.
+    ///
+    /// Overridden per-model via `[models.load] min_p`.
+    #[serde(default)]
+    pub min_p: Option<f32>,
     /// Additional CLI flags appended verbatim to the subprocess command line.
     ///
-    /// Example: `["--flash-attn", "--spec-type", "draft-mtp", "--spec-draft-n-max", "2"]`
+    /// Example: `["--flash-attn", "on", "--parallel", "2"]`. Prefer the typed
+    /// `spec_type` / `spec_draft_n_max` / `draft_model` fields above for
+    /// speculative decoding — they support per-model overrides, this doesn't.
     #[serde(default)]
     pub extra_flags: Vec<String>,
 }
@@ -45,6 +85,13 @@ impl Default for BackendConfig {
             internal_port: default_internal_port(),
             startup_timeout_secs: default_startup_timeout(),
             restart_on_crash: true,
+            spec_type: None,
+            spec_draft_n_max: None,
+            draft_model: None,
+            chat_template_kwargs: None,
+            temperature: None,
+            top_p: None,
+            min_p: None,
             extra_flags: Vec::new(),
         }
     }

@@ -219,7 +219,11 @@ fn try_parse_tool_call(buf: &str) -> Option<ParsedEvent> {
 
     // First try standard JSON
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
+        if let Some(name) = v
+            .get("name")
+            .or_else(|| v.get("function"))
+            .and_then(|n| n.as_str())
+        {
             let mut arguments = v
                 .get("arguments")
                 .or_else(|| v.get("parameters"))
@@ -242,12 +246,15 @@ fn try_parse_tool_call(buf: &str) -> Option<ParsedEvent> {
     // Fallback: Model hallucinated XML tags (e.g. <function_name>Write</function_name> or <Write>) OR produced invalid JSON structure
     let mut ext_name = None;
 
-    // Try to extract name from `"name": "bash"` directly
-    if let Some(n_start) = buf.find(r#""name""#) {
-        let rest = &buf[n_start + 6..];
-        if let Some(quote1) = rest.find('"') {
-            if let Some(quote2) = rest[quote1 + 1..].find('"') {
-                ext_name = Some(rest[quote1 + 1..quote1 + 1 + quote2].to_string());
+    // Try to extract name from `"name": "bash"` or `"function": "bash"` directly
+    for key in [r#""name""#, r#""function""#] {
+        if let Some(n_start) = buf.find(key) {
+            let rest = &buf[n_start + key.len()..];
+            if let Some(quote1) = rest.find('"') {
+                if let Some(quote2) = rest[quote1 + 1..].find('"') {
+                    ext_name = Some(rest[quote1 + 1..quote1 + 1 + quote2].to_string());
+                    break;
+                }
             }
         }
     }
@@ -400,6 +407,29 @@ mod tests {
         if let Some(ParsedEvent::ToolCallReady { name, arguments }) = tool_evt {
             assert_eq!(name, "Read");
             assert_eq!(arguments["file_path"], "/foo.rs");
+        }
+    }
+
+    #[test]
+    fn tool_call_with_function_key_parsed_correctly() {
+        // Qwen3 sometimes emits `"function"` instead of the OpenAI-standard `"name"` key.
+        let mut p = StreamParser::new();
+        let evts = feed(
+            &mut p,
+            &[
+                "<tool_call>\n",
+                r#"{"function": "bash", "arguments": {"command": "ls"}}"#,
+                "\n</tool_call>",
+            ],
+        );
+
+        let tool_evt = evts
+            .iter()
+            .find(|e| matches!(e, ParsedEvent::ToolCallReady { .. }));
+        assert!(tool_evt.is_some());
+        if let Some(ParsedEvent::ToolCallReady { name, arguments }) = tool_evt {
+            assert_eq!(name, "bash");
+            assert_eq!(arguments["command"], "ls");
         }
     }
 

@@ -71,6 +71,7 @@ pub struct ChatCompletionRequest {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub top_k: Option<u32>,
+    pub min_p: Option<f32>,
     #[allow(dead_code)]
     pub seed: Option<u64>,
     pub tools: Option<Vec<serde_json::Value>>,

@@ -12,14 +12,14 @@ use std::thread;
 use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
-use llama_cpp_2::context::params::{KvCacheType, LlamaContextParams};
+use llama_cpp_2::context::params::{KvCacheType as LlamaKvCacheType, LlamaContextParams};
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 #[allow(deprecated)]
 use llama_cpp_2::model::{AddBos, LlamaModel, Special};
 
-use crate::config::{KvBits, KvCacheConfig, ModelConfig};
+use crate::config::{KvCacheConfig, KvType, ModelConfig};
 use crate::inference::sampler::build_sampler;
 use crate::kv_cache::PrefixCache;
 use crate::model::backend::{
@@ -38,7 +38,7 @@ enum BackendCommand {
     /// Tear down the current `LlamaContext` and rebuild with new parameters.
     ///
     /// Model weights remain loaded. Used by the bench command to test multiple
-    /// (context_size × kv_bits) combinations without reloading the model.
+    /// (context_size × kv_cache type) combinations without reloading the model.
     ReconfigureContext {
         n_ctx: u32,
         kv_config: KvCacheConfig,
@@ -163,15 +163,18 @@ impl ModelBackend for LlamaCppBackend {
 
 // ── Inference Thread ─────────────────────────────────────────────────────────
 
-/// Map our [`KvBits`] config to a llama.cpp [`KvCacheType`].
-fn kv_cache_type(bits: &KvBits) -> KvCacheType {
-    match bits {
-        KvBits::Two | KvBits::Three => {
-            warn!("KV bits 2/3 not natively supported by llama.cpp — using Q4_0");
-            KvCacheType::Q4_0
-        }
-        KvBits::Four => KvCacheType::Q4_0,
-        KvBits::Eight => KvCacheType::Q8_0,
+/// Map our [`KvType`] config to a llama.cpp [`LlamaKvCacheType`].
+fn kv_cache_type(kv_type: KvType) -> LlamaKvCacheType {
+    match kv_type {
+        KvType::F32 => LlamaKvCacheType::F32,
+        KvType::F16 => LlamaKvCacheType::F16,
+        KvType::Bf16 => LlamaKvCacheType::BF16,
+        KvType::Q8_0 => LlamaKvCacheType::Q8_0,
+        KvType::Q4_0 => LlamaKvCacheType::Q4_0,
+        KvType::Q4_1 => LlamaKvCacheType::Q4_1,
+        KvType::Iq4Nl => LlamaKvCacheType::IQ4_NL,
+        KvType::Q5_0 => LlamaKvCacheType::Q5_0,
+        KvType::Q5_1 => LlamaKvCacheType::Q5_1,
     }
 }
 
@@ -280,14 +283,13 @@ fn rebuild_context<'a>(
 ) -> Result<llama_cpp_2::context::LlamaContext<'a>> {
     let ctx_size = NonZeroU32::new(n_ctx)
         .unwrap_or_else(|| NonZeroU32::new(8192).expect("constant is non-zero"));
-    let kv_type = kv_cache_type(&kv_config.bits);
     let ctx_params = LlamaContextParams::default()
         .with_n_ctx(Some(ctx_size))
         .with_n_batch(config.batch_size)
         .with_n_threads(config.threads as i32)
         .with_n_threads_batch(config.threads as i32)
-        .with_type_k(kv_type)
-        .with_type_v(kv_type);
+        .with_type_k(kv_cache_type(kv_config.type_k))
+        .with_type_v(kv_cache_type(kv_config.type_v));
     model
         .new_context(backend, ctx_params)
         .context("failed to create llama context")

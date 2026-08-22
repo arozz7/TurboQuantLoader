@@ -128,7 +128,7 @@ pub trait ModelBackend: Send + Sync {
     ///
     /// Model weights remain loaded — only the `LlamaContext` is rebuilt, which
     /// is fast (~50 ms). Used by the `bench` command to test multiple
-    /// (context_size × kv_bits) configurations without reloading the model.
+    /// (context_size × kv_type) configurations without reloading the model.
     ///
     /// Default implementation is a no-op (backends that don't support
     /// reconfiguration at runtime simply ignore the call).

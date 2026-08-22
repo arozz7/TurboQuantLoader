@@ -294,19 +294,39 @@ fn build_args(config: &AppConfig) -> Vec<String> {
 
     // KV Cache settings for native llama-server.
     if b.variant == BackendVariant::LlamaServer {
-        let bit_type = match config.kv_cache.bits {
-            crate::config::KvBits::Two => "q2_K",
-            crate::config::KvBits::Three => "q3_K",
-            crate::config::KvBits::Four => "q4_0",
-            crate::config::KvBits::Eight => "q8_0",
-        };
-        args.extend(["--cache-type-k".into(), bit_type.into()]);
-        args.extend(["--cache-type-v".into(), bit_type.into()]);
+        args.extend([
+            "--cache-type-k".into(),
+            config.kv_cache.type_k.as_cli_str().into(),
+        ]);
+        args.extend([
+            "--cache-type-v".into(),
+            config.kv_cache.type_v.as_cli_str().into(),
+        ]);
     }
 
     // TurboQuant variant: append the custom KV cache type flag.
     if b.variant == BackendVariant::TurboQuant {
         args.extend(["--cache-type-k".into(), "turbo3".into()]);
+    }
+
+    // Speculative decoding and chat-template flags. `[backend]` fields already
+    // hold the effective per-model values — the caller merges `[models.load]`
+    // overrides onto a cloned `BackendConfig` before starting the process, so
+    // this function only ever reads one flat set of fields.
+    if let Some(ref spec_type) = b.spec_type {
+        args.extend(["--spec-type".into(), spec_type.clone()]);
+        if let Some(n_max) = b.spec_draft_n_max {
+            args.extend(["--spec-draft-n-max".into(), n_max.to_string()]);
+        }
+    }
+    if let Some(ref draft_model) = b.draft_model {
+        args.extend([
+            "--spec-draft-model".into(),
+            draft_model.to_string_lossy().into_owned(),
+        ]);
+    }
+    if let Some(ref kwargs) = b.chat_template_kwargs {
+        args.extend(["--chat-template-kwargs".into(), kwargs.to_string()]);
     }
 
     // User-supplied extra flags (verbatim).
@@ -340,6 +360,7 @@ mod tests {
                 startup_timeout_secs: 30,
                 restart_on_crash: true,
                 extra_flags: vec!["--flash-attn".into()],
+                ..BackendConfig::default()
             },
             ..AppConfig::default()
         }
@@ -366,6 +387,50 @@ mod tests {
         cfg.backend.variant = BackendVariant::TurboQuant;
         let args = build_args(&cfg);
         assert!(args.windows(2).any(|w| w == ["--cache-type-k", "turbo3"]));
+    }
+
+    #[test]
+    fn spec_decoding_flags_omitted_when_unset() {
+        let cfg = test_config();
+        let args = build_args(&cfg);
+        assert!(!args.iter().any(|a| a == "--spec-type"));
+        assert!(!args.iter().any(|a| a == "--spec-draft-n-max"));
+        assert!(!args.iter().any(|a| a == "--spec-draft-model"));
+    }
+
+    #[test]
+    fn spec_decoding_flags_included_when_set() {
+        let mut cfg = test_config();
+        cfg.backend.spec_type = Some("draft-mtp".into());
+        cfg.backend.spec_draft_n_max = Some(2);
+        let args = build_args(&cfg);
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--spec-type", "draft-mtp"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--spec-draft-n-max", "2"]));
+    }
+
+    #[test]
+    fn draft_model_flag_included_when_set() {
+        let mut cfg = test_config();
+        cfg.backend.spec_type = Some("draft-dspark".into());
+        cfg.backend.draft_model = Some(PathBuf::from("/models/dspark-drafter.gguf"));
+        let args = build_args(&cfg);
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--spec-draft-model", "/models/dspark-drafter.gguf"]));
+    }
+
+    #[test]
+    fn chat_template_kwargs_serialized_as_json() {
+        let mut cfg = test_config();
+        cfg.backend.chat_template_kwargs =
+            Some(serde_json::json!({"reasoning_effort": "medium"}));
+        let args = build_args(&cfg);
+        assert!(args.windows(2).any(|w| w[0] == "--chat-template-kwargs"
+            && w[1] == r#"{"reasoning_effort":"medium"}"#));
     }
 
     #[test]
