@@ -402,7 +402,7 @@ mod tests {
             .collect();
         assert!(!thinking.is_empty());
 
-        assert!(evts.iter().any(|e| *e == ParsedEvent::ThinkingEnd));
+        assert!(evts.contains(&ParsedEvent::ThinkingEnd));
 
         let text: Vec<_> = evts
             .iter()
@@ -420,7 +420,7 @@ mod tests {
         assert!(evts
             .iter()
             .any(|e| matches!(e, ParsedEvent::ThinkingToken(_))));
-        assert!(evts.iter().any(|e| *e == ParsedEvent::ThinkingEnd));
+        assert!(evts.contains(&ParsedEvent::ThinkingEnd));
     }
 
     #[test]
@@ -473,7 +473,7 @@ mod tests {
         let mut p = StreamParser::new();
         let evts = feed(&mut p, &["Just a plain response."]);
         assert!(evts.iter().all(|e| matches!(e, ParsedEvent::TextToken(_))));
-        assert!(!evts.iter().any(|e| *e == ParsedEvent::ThinkingEnd));
+        assert!(!evts.contains(&ParsedEvent::ThinkingEnd));
     }
 
     #[test]
@@ -495,7 +495,10 @@ mod tests {
         let tool_evt = evts
             .iter()
             .find(|e| matches!(e, ParsedEvent::ToolCallReady { .. }));
-        assert!(tool_evt.is_some(), "expected a recovered tool call, got: {evts:?}");
+        assert!(
+            tool_evt.is_some(),
+            "expected a recovered tool call, got: {evts:?}"
+        );
         if let Some(ParsedEvent::ToolCallReady { name, .. }) = tool_evt {
             assert_eq!(name, "bash");
         }
@@ -510,11 +513,18 @@ mod tests {
         let mut p = StreamParser::new();
         let evts = feed(
             &mut p,
-            &["<tool_call>\n", "not json at all", "\n</tool_call>", "after"],
+            &[
+                "<tool_call>\n",
+                "not json at all",
+                "\n</tool_call>",
+                "after",
+            ],
         );
 
         assert!(
-            !evts.iter().any(|e| matches!(e, ParsedEvent::ToolCallReady { .. })),
+            !evts
+                .iter()
+                .any(|e| matches!(e, ParsedEvent::ToolCallReady { .. })),
             "garbage input should not fabricate a tool call"
         );
         let combined: String = evts

@@ -50,8 +50,9 @@ impl ModelRegistry {
         // llama-server as a set once given the first shard's path — list only
         // that first shard so split models don't show up as N separate,
         // individually-unloadable entries.
-        let (_continuation_shards, model_paths): (Vec<_>, Vec<_>) =
-            remaining.into_iter().partition(|p| is_split_continuation(p));
+        let (_continuation_shards, model_paths): (Vec<_>, Vec<_>) = remaining
+            .into_iter()
+            .partition(|p| is_split_continuation(p));
 
         let entries = model_paths
             .into_iter()
@@ -272,9 +273,17 @@ mod tests {
 
     #[test]
     fn is_split_continuation_keeps_only_first_shard() {
-        assert!(!is_split_continuation(Path::new("/models/x-00001-of-00004.gguf")));
-        assert!(is_split_continuation(Path::new("/models/x-00002-of-00004.gguf")));
-        assert!(is_split_continuation(Path::new("/models/x-00004-of-00004.gguf")));
-        assert!(!is_split_continuation(Path::new("/models/single-file.gguf")));
+        assert!(!is_split_continuation(Path::new(
+            "/models/x-00001-of-00004.gguf"
+        )));
+        assert!(is_split_continuation(Path::new(
+            "/models/x-00002-of-00004.gguf"
+        )));
+        assert!(is_split_continuation(Path::new(
+            "/models/x-00004-of-00004.gguf"
+        )));
+        assert!(!is_split_continuation(Path::new(
+            "/models/single-file.gguf"
+        )));
     }
 }

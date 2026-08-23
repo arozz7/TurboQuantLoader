@@ -298,7 +298,11 @@ async fn cmd_bench(config: AppConfig, args: BenchArgs) -> Result<()> {
     let kv_types_list: Vec<KvType> = args
         .kv_types
         .split(',')
-        .map(|s| s.trim().parse::<KvType>().map_err(|e| anyhow::anyhow!("{e}")))
+        .map(|s| {
+            s.trim()
+                .parse::<KvType>()
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        })
         .collect::<Result<_>>()?;
 
     // ── Load bench prompt ─────────────────────────────────────────────────────
@@ -388,7 +392,10 @@ async fn cmd_bench(config: AppConfig, args: BenchArgs) -> Result<()> {
                         break;
                     }
                     Some(GenerateEvent::Error(e)) => {
-                        eprintln!("  error ctx={ctx_size} kv_type={}: {e}", kv_type.as_cli_str());
+                        eprintln!(
+                            "  error ctx={ctx_size} kv_type={}: {e}",
+                            kv_type.as_cli_str()
+                        );
                         break;
                     }
                     None => break,

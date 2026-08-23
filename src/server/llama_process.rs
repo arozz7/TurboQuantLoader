@@ -404,12 +404,8 @@ mod tests {
         cfg.backend.spec_type = Some("draft-mtp".into());
         cfg.backend.spec_draft_n_max = Some(2);
         let args = build_args(&cfg);
-        assert!(args
-            .windows(2)
-            .any(|w| w == ["--spec-type", "draft-mtp"]));
-        assert!(args
-            .windows(2)
-            .any(|w| w == ["--spec-draft-n-max", "2"]));
+        assert!(args.windows(2).any(|w| w == ["--spec-type", "draft-mtp"]));
+        assert!(args.windows(2).any(|w| w == ["--spec-draft-n-max", "2"]));
     }
 
     #[test]
@@ -426,11 +422,11 @@ mod tests {
     #[test]
     fn chat_template_kwargs_serialized_as_json() {
         let mut cfg = test_config();
-        cfg.backend.chat_template_kwargs =
-            Some(serde_json::json!({"reasoning_effort": "medium"}));
+        cfg.backend.chat_template_kwargs = Some(serde_json::json!({"reasoning_effort": "medium"}));
         let args = build_args(&cfg);
-        assert!(args.windows(2).any(|w| w[0] == "--chat-template-kwargs"
-            && w[1] == r#"{"reasoning_effort":"medium"}"#));
+        assert!(args.windows(2).any(
+            |w| w[0] == "--chat-template-kwargs" && w[1] == r#"{"reasoning_effort":"medium"}"#
+        ));
     }
 
     #[test]

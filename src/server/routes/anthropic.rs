@@ -113,7 +113,15 @@ pub async fn create_message(
 
     if req.stream {
         let url = format!("{base_url}/v1/chat/completions");
-        let body = build_chat_body(&messages, true, max_tokens, temperature, top_p, top_k, min_p);
+        let body = build_chat_body(
+            &messages,
+            true,
+            max_tokens,
+            temperature,
+            top_p,
+            top_k,
+            min_p,
+        );
         let rx = spawn_tracked_reader(&http, &url, body, state.metrics.clone(), model_name.clone())
             .await?;
         Ok(streaming_response(
@@ -125,7 +133,15 @@ pub async fn create_message(
         ))
     } else {
         let url = format!("{base_url}/v1/chat/completions");
-        let body = build_chat_body(&messages, false, max_tokens, temperature, top_p, top_k, min_p);
+        let body = build_chat_body(
+            &messages,
+            false,
+            max_tokens,
+            temperature,
+            top_p,
+            top_k,
+            min_p,
+        );
         let start = Instant::now();
         state
             .metrics

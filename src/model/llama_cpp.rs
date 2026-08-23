@@ -477,6 +477,9 @@ fn do_generate(
         tokens_per_second: tps,
         context_tokens: prompt_len as u32 + tokens_generated,
         finish_reason: "stop".to_string(),
+        // The in-process llama-cpp-2 backend has no llama-server-style
+        // prompt cache to report a hit rate for.
+        cached_tokens: 0,
     }));
 
     Ok(())

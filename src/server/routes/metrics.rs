@@ -29,10 +29,19 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let (gen_p50, gen_p95, gen_p99) = state.metrics.generation_ms_percentiles().await;
     let (ctx_p50, ctx_p95, ctx_p99) = state.metrics.context_size_percentiles().await;
     let (stop_count, length_count, tool_calls_count) = state.metrics.finish_reason_counts().await;
-    let max_context = state.metrics.max_context_tokens.load(std::sync::atomic::Ordering::Relaxed);
+    let max_context = state
+        .metrics
+        .max_context_tokens
+        .load(std::sync::atomic::Ordering::Relaxed);
     let avg_context = state.metrics.avg_context_tokens();
-    let total_cached = state.metrics.total_cached_tokens.load(std::sync::atomic::Ordering::Relaxed);
-    let total_prompt = state.metrics.total_prompt_tokens.load(std::sync::atomic::Ordering::Relaxed);
+    let total_cached = state
+        .metrics
+        .total_cached_tokens
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let total_prompt = state
+        .metrics
+        .total_prompt_tokens
+        .load(std::sync::atomic::Ordering::Relaxed);
     let cache_hit_rate = state.metrics.cache_hit_rate();
 
     let status = if backend_state == ProcessState::Ready {
@@ -140,9 +149,15 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoRespo
     let (gen_p50, gen_p95, gen_p99) = state.metrics.generation_ms_percentiles().await;
     let (ctx_p50, ctx_p95, ctx_p99) = state.metrics.context_size_percentiles().await;
     let (stop_count, length_count, tool_calls_count) = state.metrics.finish_reason_counts().await;
-    let max_context = state.metrics.max_context_tokens.load(std::sync::atomic::Ordering::Relaxed);
+    let max_context = state
+        .metrics
+        .max_context_tokens
+        .load(std::sync::atomic::Ordering::Relaxed);
     let avg_context = state.metrics.avg_context_tokens();
-    let total_cached = state.metrics.total_cached_tokens.load(std::sync::atomic::Ordering::Relaxed);
+    let total_cached = state
+        .metrics
+        .total_cached_tokens
+        .load(std::sync::atomic::Ordering::Relaxed);
     let cache_hit_rate = state.metrics.cache_hit_rate();
     let gpu_stats = state.metrics.gpu_stats.read().await.clone();
 
@@ -216,7 +231,9 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoRespo
     out.push_str("# TYPE tql_generation_p99_ms gauge\n");
     out.push_str(&format!("tql_generation_p99_ms {gen_p99}\n\n"));
 
-    out.push_str("# HELP tql_cached_tokens_total Cumulative prompt tokens served from KV prefix cache\n");
+    out.push_str(
+        "# HELP tql_cached_tokens_total Cumulative prompt tokens served from KV prefix cache\n",
+    );
     out.push_str("# TYPE tql_cached_tokens_total counter\n");
     out.push_str(&format!("tql_cached_tokens_total {total_cached}\n\n"));
 
@@ -231,7 +248,9 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoRespo
         state.metrics.uptime_secs()
     ));
 
-    out.push_str("# HELP tql_context_tokens_max Largest context (prompt+completion tokens) ever seen\n");
+    out.push_str(
+        "# HELP tql_context_tokens_max Largest context (prompt+completion tokens) ever seen\n",
+    );
     out.push_str("# TYPE tql_context_tokens_max gauge\n");
     out.push_str(&format!("tql_context_tokens_max {max_context}\n\n"));
 
@@ -302,9 +321,15 @@ pub async fn admin_stats(State(state): State<AppState>) -> impl IntoResponse {
     let (gen_p50, gen_p95, gen_p99) = state.metrics.generation_ms_percentiles().await;
     let (ctx_p50, ctx_p95, ctx_p99) = state.metrics.context_size_percentiles().await;
     let (stop_count, length_count, tool_calls_count) = state.metrics.finish_reason_counts().await;
-    let max_context = state.metrics.max_context_tokens.load(std::sync::atomic::Ordering::Relaxed);
+    let max_context = state
+        .metrics
+        .max_context_tokens
+        .load(std::sync::atomic::Ordering::Relaxed);
     let avg_context = state.metrics.avg_context_tokens();
-    let total_cached = state.metrics.total_cached_tokens.load(std::sync::atomic::Ordering::Relaxed);
+    let total_cached = state
+        .metrics
+        .total_cached_tokens
+        .load(std::sync::atomic::Ordering::Relaxed);
     let cache_hit_rate = state.metrics.cache_hit_rate();
 
     let requests: Vec<serde_json::Value> = recent
