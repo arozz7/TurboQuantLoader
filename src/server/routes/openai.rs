@@ -536,6 +536,23 @@ async fn non_streaming_response(
                 0.0
             };
 
+            // Mirrors spawn_tracked_reader's "request complete" line on the
+            // streaming path (src/server/proxy.rs) so both code paths are
+            // equally visible in the logs — non-streaming previously had no
+            // per-request summary line at all, only silent metrics.record().
+            // ttft_ms equals generation_ms here: a non-streaming response has
+            // no earlier partial signal, the whole body arrives at once.
+            tracing::info!(
+                model = %model_name,
+                prompt_tokens,
+                completion_tokens,
+                ttft_ms = generation_ms,
+                generation_ms,
+                tps = format!("{tps:.1}"),
+                finish_reason = %finish_reason,
+                "request complete"
+            );
+
             conv_logger.log(&ConversationEntry {
                 ts: now_iso8601(),
                 id: request_id,
