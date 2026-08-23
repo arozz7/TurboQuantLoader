@@ -20,10 +20,17 @@ restart_on_crash     = true
 # acceptance rate observed). Override per-model via [models.load] for models
 # needing a different --spec-type (e.g. "draft-dspark" with an external
 # draft_model file, instead of the built-in MTP head).
-# spec_draft_n_max = 2 is Unsloth's documented sweet spot for draft-mtp
-# (acceptance rate drops 83%→50% at n_max=4) — see docs/models/qwen3.8.
+# spec_draft_n_max / p-min: a published recipe for Qwen3.6-27B on this same
+# Arc B70 GPU (sergiiob.dev "Full Recipe") pairs n_max=4 with
+# --spec-draft-p-min 0.75 (below, in extra_flags) and reports 93-94% draft
+# acceptance — much higher than the ~50-60% we saw testing n_max=1/2 alone.
+# The likely mechanism: p-min gates out low-confidence draft proposals
+# before they're offered, so raising n_max no longer tanks acceptance the
+# way it does unguarded (Unsloth's docs warn n_max=4 drops to ~50% without
+# such a gate). Testing the pair together. Revert n_max to 1-2 and drop
+# --spec-draft-p-min if acceptance doesn't improve.
 spec_type            = "draft-mtp"
-spec_draft_n_max     = 2
+spec_draft_n_max     = 4
 
 # Sampling defaults for the active default model (Qwen3.8-27B, [model] section
 # below) — Unsloth's documented Thinking Mode values (docs/models/qwen3.8).
@@ -39,7 +46,23 @@ top_p                = 0.95
 min_p                = 0.0
 
 # Extra CLI flags appended verbatim to every model, regardless of [models.load].
-extra_flags          = ["--flash-attn", "on", "--parallel", "2"]
+# --parallel 1: real usage is single-stream (only one slot is ever actually
+# busy — confirmed in logs) — 2 slots halved n_ctx_slot for no concurrency
+# benefit and duplicated recurrent-state/speculative-context buffers for a
+# second stream that's never used. Revert to 2 if concurrent requests are
+# ever actually needed.
+# --ubatch-size 4096: matches [model] batch_size below — the published Arc
+# B70 recipe (sergiiob.dev) uses -b 8192 -ub 4096 and notes reducing ubatch
+# "hurt[s] prefill significantly". Raising it lets llama-server dispatch
+# bigger prefill chunks per call, improving time-to-first-token on cache-miss
+# turns. Does not affect steady-state decode tok/s.
+# --spec-draft-p-min 0.75: paired with spec_draft_n_max=4 above — see comment
+# there. Not a typed [backend] field yet since it's global-only (extra_flags
+# has no per-model override), unlike spec_draft_n_max.
+# --no-mmap: same recipe explicitly disables mmap. Untested here whether this
+# matters on Windows/Vulkan the way it might on the recipe's Linux/SYCL setup
+# — worth watching load time and the RAM footprint we characterized earlier.
+extra_flags          = ["--flash-attn", "on", "--parallel", "1", "--ubatch-size", "4096", "--spec-draft-p-min", "0.75", "--no-mmap"]
 
 [model]
 # ── Path configuration (platform-specific — override in config.local.toml) ───
@@ -73,7 +96,10 @@ main_gpu = 1
 # Halved from 262144 to leave VRAM headroom while the full model sits on
 # the Arc B70 alone (RTX 4070 Ti Super currently idle, no tensor split).
 context_size = 131072
-batch_size   = 4096
+# batch_size: bumped from 4096 to match the published Arc B70 recipe
+# (sergiiob.dev "-b 8192"), reported as "optimal SYCL prefill throughput" —
+# untested here whether the same holds on Vulkan, but it's a one-line try.
+batch_size   = 8192
 threads      = 8    # CPU threads for non-GPU ops; tune to your core count
 
 # model_idle_timeout_secs: seconds of inactivity required before a client-requested
@@ -86,10 +112,15 @@ model_idle_timeout_secs = 1800   # 30 minutes
 # type_k / type_v: "f32" | "f16" | "bf16" | "q8_0" | "q4_0" | "q4_1" | "iq4_nl" | "q5_0" | "q5_1"
 # f16 = llama.cpp's own default, no quantization — set independently per
 # tensor since K (keys, used in attention score dot-products) is more
-# sensitive to quantization error than V (values). A common tuning step once
-# VRAM is tight: drop type_v to q8_0 or q4_0 before touching type_k.
-type_k           = "f16"
-type_v           = "f16"
+# sensitive to quantization error than V (values). A published recipe for
+# this same Arc B70 GPU (sergiiob.dev) explicitly warns "never use q4_0 for
+# K" (KL-divergence ~5.5, only 11.6% top-p token match) but reports q8_0/K +
+# q4_1/V as "near-lossless" (KL ~0.003) with V "tolerat[ing] aggressive
+# quantization" fine. We measured f16/f16 as no faster than the old q4_0/q4_0
+# at long context (both decayed identically), so this asymmetric split is
+# worth testing as a quality/VRAM middle ground rather than a speed play.
+type_k           = "q8_0"
+type_v           = "q4_1"
 # strategy: "llama_native" | "turbo_quant"
 strategy         = "llama_native"
 # memory_budget_mb = 4096   # optional cap; omit for unlimited
