@@ -51,18 +51,23 @@ min_p                = 0.0
 # benefit and duplicated recurrent-state/speculative-context buffers for a
 # second stream that's never used. Revert to 2 if concurrent requests are
 # ever actually needed.
-# --ubatch-size 4096: matches [model] batch_size below — the published Arc
-# B70 recipe (sergiiob.dev) uses -b 8192 -ub 4096 and notes reducing ubatch
-# "hurt[s] prefill significantly". Raising it lets llama-server dispatch
-# bigger prefill chunks per call, improving time-to-first-token on cache-miss
-# turns. Does not affect steady-state decode tok/s.
 # --spec-draft-p-min 0.75: paired with spec_draft_n_max=4 above — see comment
 # there. Not a typed [backend] field yet since it's global-only (extra_flags
 # has no per-model override), unlike spec_draft_n_max.
-# --no-mmap: same recipe explicitly disables mmap. Untested here whether this
-# matters on Windows/Vulkan the way it might on the recipe's Linux/SYCL setup
-# — worth watching load time and the RAM footprint we characterized earlier.
-extra_flags          = ["--flash-attn", "on", "--parallel", "1", "--ubatch-size", "4096", "--spec-draft-p-min", "0.75", "--no-mmap"]
+#
+# REVERTED 2026-08-25: --ubatch-size was bumped to 4096 and --no-mmap was
+# added, both from the same Arc B70 recipe, both explicitly flagged there as
+# "untested here". Within a live agent session this caused repeated
+# `bad allocation` crashes during decode (llama-server's prompt-cache
+# subsystem self-reduced its budget from a normal size down to 180 MiB in
+# reaction to a real allocation failure, then every subsequent request hit
+# the same wall with less headroom each time until a fatal GGML_ASSERT
+# killed the process). Confirmed not caused by another process contending
+# for VRAM (LM Studio killed, crash still reproduced). Reverted ubatch-size
+# to its prior value and dropped --no-mmap entirely; kept everything else
+# from phase 13 (KV type split, spec_draft_n_max=4 + p-min) since those
+# showed real measured gains and aren't the implicated memory growth.
+extra_flags          = ["--flash-attn", "on", "--parallel", "1", "--ubatch-size", "2048", "--spec-draft-p-min", "0.75"]
 
 [model]
 # ── Path configuration (platform-specific — override in config.local.toml) ───
@@ -96,10 +101,11 @@ main_gpu = 1
 # Halved from 262144 to leave VRAM headroom while the full model sits on
 # the Arc B70 alone (RTX 4070 Ti Super currently idle, no tensor split).
 context_size = 131072
-# batch_size: bumped from 4096 to match the published Arc B70 recipe
-# (sergiiob.dev "-b 8192"), reported as "optimal SYCL prefill throughput" —
-# untested here whether the same holds on Vulkan, but it's a one-line try.
-batch_size   = 8192
+# REVERTED 2026-08-25: was bumped to 8192 to match the same Arc B70 recipe
+# (sergiiob.dev "-b 8192"); reverted alongside --ubatch-size and --no-mmap
+# after repeated bad_alloc crashes during a live agent session — see
+# extra_flags comment above for the full incident.
+batch_size   = 4096
 threads      = 8    # CPU threads for non-GPU ops; tune to your core count
 
 # model_idle_timeout_secs: seconds of inactivity required before a client-requested
