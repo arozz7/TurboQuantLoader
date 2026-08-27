@@ -24,6 +24,12 @@ pub enum ProcessState {
     Stopped,
 }
 
+/// True if a llama-server stderr line reports a fatal GPU/backend error that
+/// leaves the process running but permanently unable to serve requests.
+fn is_fatal_backend_error(line: &str) -> bool {
+    line.contains("device lost") || line.contains("ErrorDeviceLost")
+}
+
 // ── LlamaProcess ─────────────────────────────────────────────────────────────
 
 /// A supervised `llama-server` subprocess.
@@ -109,6 +115,24 @@ impl LlamaProcess {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     tracing::info!(target: "llama_server", "{}", line);
+
+                    // A lost GPU device (e.g. Vulkan `device lost`) leaves the
+                    // process running with its HTTP server still up but every
+                    // decode failing — stderr never closes, so the
+                    // exit-based detection below would never fire and the
+                    // watchdog would see a "healthy" process forever. Flag it
+                    // the same way a real exit is flagged so the existing
+                    // watchdog restart logic picks it up.
+                    if is_fatal_backend_error(&line) {
+                        let mut s = state_ref.lock().await;
+                        if *s == ProcessState::Ready || *s == ProcessState::Starting {
+                            *s = ProcessState::Crashed;
+                            tracing::warn!(
+                                "llama-server backend reported a fatal GPU error — marking crashed"
+                            );
+                        }
+                        break;
+                    }
                 }
                 // When stderr closes the process has exited.
                 let mut s = state_ref.lock().await;
@@ -304,6 +328,15 @@ fn build_args(config: &AppConfig) -> Vec<String> {
         ]);
     }
 
+    // Prompt-cache RAM budget (llama-server's `--cache-ram`, host RAM used to
+    // store slot checkpoints for fast prefix reuse — separate from the
+    // active on-GPU KV cache). Left unset, llama-server applies its own
+    // 8192 MiB default; set explicitly here once a value is configured so
+    // it's a deliberate choice rather than a silent default.
+    if let Some(mb) = config.kv_cache.memory_budget_mb {
+        args.extend(["--cache-ram".into(), mb.to_string()]);
+    }
+
     // TurboQuant variant: append the custom KV cache type flag.
     if b.variant == BackendVariant::TurboQuant {
         args.extend(["--cache-type-k".into(), "turbo3".into()]);
@@ -364,6 +397,32 @@ mod tests {
             },
             ..AppConfig::default()
         }
+    }
+
+    #[test]
+    fn is_fatal_backend_error_detects_device_lost() {
+        assert!(is_fatal_backend_error(
+            "ggml_vulkan: device lost on Vulkan1"
+        ));
+        assert!(is_fatal_backend_error(
+            "srv update_slots: decode() failed: vk::Device::getFenceStatus: ErrorDeviceLost"
+        ));
+        assert!(!is_fatal_backend_error("srv update_slots: processing task"));
+    }
+
+    #[test]
+    fn cache_ram_flag_omitted_when_unset() {
+        let cfg = test_config();
+        let args = build_args(&cfg);
+        assert!(!args.iter().any(|a| a == "--cache-ram"));
+    }
+
+    #[test]
+    fn cache_ram_flag_included_when_set() {
+        let mut cfg = test_config();
+        cfg.kv_cache.memory_budget_mb = Some(4096);
+        let args = build_args(&cfg);
+        assert!(args.windows(2).any(|w| w == ["--cache-ram", "4096"]));
     }
 
     #[test]
