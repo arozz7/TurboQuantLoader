@@ -116,17 +116,22 @@ model_idle_timeout_secs = 1800   # 30 minutes
 
 [kv_cache]
 # type_k / type_v: "f32" | "f16" | "bf16" | "q8_0" | "q4_0" | "q4_1" | "iq4_nl" | "q5_0" | "q5_1"
-# f16 = llama.cpp's own default, no quantization — set independently per
-# tensor since K (keys, used in attention score dot-products) is more
-# sensitive to quantization error than V (values). A published recipe for
-# this same Arc B70 GPU (sergiiob.dev) explicitly warns "never use q4_0 for
-# K" (KL-divergence ~5.5, only 11.6% top-p token match) but reports q8_0/K +
-# q4_1/V as "near-lossless" (KL ~0.003) with V "tolerat[ing] aggressive
-# quantization" fine. We measured f16/f16 as no faster than the old q4_0/q4_0
-# at long context (both decayed identically), so this asymmetric split is
-# worth testing as a quality/VRAM middle ground rather than a speed play.
-type_k           = "q8_0"
-type_v           = "q4_1"
+# CHANGED 2026-08-28: switched from q8_0/q4_1 to f16/f16 after a matched-depth
+# A/B/C test at 83,098 prompt tokens (~63% of the 131072 context) against this
+# same Arc B70. The earlier q8_0/K + q4_1/V split (a sergiiob.dev recipe) was
+# assumed to be a speed win; measured, it was not:
+#   q8_0/q4_1: decode 4.31 tok/s, prefill  72.8 tok/s, draft accept 91.1%, VRAM 21.5 GB idle
+#   f16/f16:   decode 3.87 tok/s, prefill 132.0 tok/s, draft accept 97.0%, VRAM ~26.2 GB
+#   f16/q8_0:  decode 3.47 tok/s, prefill  95.0 tok/s, draft accept 92.7%, VRAM ~24.3 GB (dominated — worse than both above, skip)
+# Quantized KV was ~10% faster at raw decode but 44% slower at prefill (which
+# dominates wall-clock on large prompts) and had meaningfully worse MTP draft
+# acceptance. f16/f16 uses ~4.7 GB more VRAM (20% headroom left on the 32 GB
+# B70 vs. 34% for q8_0/q4_1), but that headroom is fixed at model-load time —
+# llama-server pre-allocates the KV buffer for the full --ctx-size up front,
+# so VRAM does NOT grow further as a session's actual token count increases
+# toward 131072. It is a one-time budget check, not a growing risk.
+type_k           = "f16"
+type_v           = "f16"
 # strategy: "llama_native" | "turbo_quant"
 strategy         = "llama_native"
 # memory_budget_mb = 4096   # optional cap; omit for unlimited
