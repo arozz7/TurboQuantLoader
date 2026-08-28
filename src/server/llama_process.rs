@@ -30,6 +30,30 @@ fn is_fatal_backend_error(line: &str) -> bool {
     line.contains("device lost") || line.contains("ErrorDeviceLost")
 }
 
+/// Fail fast if `port` is already bound by some other process.
+///
+/// Without this check, spawning a new llama-server child whose bind fails
+/// (port already held by a stray/orphaned process from a previous run) can
+/// still pass health-checking — `/health` on that port answers, just from
+/// the wrong process — leaving two model instances loaded and traffic
+/// routed unpredictably between them. Bailing here turns that silent,
+/// hard-to-diagnose failure mode into an immediate, clear error instead.
+async fn check_port_available(port: u16) -> Result<()> {
+    match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+        Ok(listener) => {
+            drop(listener);
+            Ok(())
+        }
+        Err(e) => {
+            bail!(
+                "port {port} is already in use (likely a stray llama-server process from a \
+                 previous run) — refusing to start a second instance against it; free the port \
+                 (check `tasklist`/`Get-Process llama-server`) and retry: {e}"
+            )
+        }
+    }
+}
+
 // ── LlamaProcess ─────────────────────────────────────────────────────────────
 
 /// A supervised `llama-server` subprocess.
@@ -77,6 +101,9 @@ impl LlamaProcess {
     // ── Internal spawn ────────────────────────────────────────────────────────
 
     async fn spawn_child(&self) -> Result<()> {
+        let port = self.config.backend.internal_port;
+        check_port_available(port).await?;
+
         let args = build_args(&self.config);
         let binary = &self.config.backend.binary_path;
 
@@ -397,6 +424,32 @@ mod tests {
             },
             ..AppConfig::default()
         }
+    }
+
+    #[tokio::test]
+    async fn check_port_available_succeeds_on_free_port() {
+        // Bind port 0 to let the OS hand back a free ephemeral port, then
+        // release it immediately so the check has something free to find.
+        let probe = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        assert!(check_port_available(port).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn check_port_available_fails_when_port_held() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let err = check_port_available(port).await.unwrap_err();
+        assert!(err.to_string().contains("already in use"));
+
+        drop(listener);
     }
 
     #[test]
