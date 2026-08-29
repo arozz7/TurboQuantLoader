@@ -251,6 +251,11 @@ async fn cmd_run(config: AppConfig) -> Result<()> {
                     std::io::stdout().flush()?;
                     response.push_str(&tok);
                 }
+                Some(GenerateEvent::Reasoning(tok)) => {
+                    print!("{tok}");
+                    std::io::stdout().flush()?;
+                    response.push_str(&tok);
+                }
                 Some(GenerateEvent::Done(summary)) => {
                     println!();
                     info!(
@@ -387,6 +392,7 @@ async fn cmd_bench(config: AppConfig, args: BenchArgs) -> Result<()> {
             loop {
                 match stream.next_event().await {
                     Some(GenerateEvent::Token(_)) => {}
+                    Some(GenerateEvent::Reasoning(_)) => {}
                     Some(GenerateEvent::Done(s)) => {
                         summary_opt = Some(s);
                         break;

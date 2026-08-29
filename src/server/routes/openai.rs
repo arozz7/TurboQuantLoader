@@ -347,6 +347,31 @@ fn streaming_response(
                     }
                     emit_events(evts, &tx);
                 }
+                GenerateEvent::Reasoning(text) => {
+                    // Already cleanly separated by llama-server (a native
+                    // `delta.reasoning_content` field) — no `<think>`-tag
+                    // parsing needed, so emit it directly instead of routing
+                    // through the StreamParser built for the non-streaming
+                    // endpoint's inline-tag format.
+                    response_buf.push_str(&text);
+                    let _ = tx.send(Ok::<_, Infallible>(data_event(&ChatCompletionChunk {
+                        id: id.clone(),
+                        object: "chat.completion.chunk",
+                        created,
+                        model: model_clone.clone(),
+                        choices: vec![StreamChoice {
+                            index: 0,
+                            delta: DeltaMessage {
+                                role: None,
+                                content: None,
+                                reasoning_content: Some(text),
+                                tool_calls: None,
+                            },
+                            finish_reason: None,
+                        }],
+                        usage: None,
+                    })));
+                }
                 GenerateEvent::Done(summary) => {
                     let evts = parser.flush();
                     if evts

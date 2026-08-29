@@ -60,6 +60,12 @@ pub struct GenerateRequest {
 pub enum GenerateEvent {
     /// A decoded text fragment (one or more unicode characters).
     Token(String),
+    /// A reasoning/thinking text fragment, carried in a backend's native
+    /// `delta.reasoning_content` field (distinct from `Token`/`delta.content`).
+    /// llama-server's streaming endpoint reports reasoning this way for chat
+    /// templates that support it, rather than embedding `<think>` tags
+    /// inline in the content stream the way its non-streaming endpoint does.
+    Reasoning(String),
     /// Generation finished successfully; carries timing and usage stats.
     Done(GenerateSummary),
     /// Generation stopped due to an error; the string is a human-readable message.

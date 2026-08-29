@@ -168,6 +168,31 @@ pub async fn spawn_event_reader(
                         }
                     }
 
+                    // llama-server's streaming endpoint reports reasoning via a
+                    // separate `delta.reasoning_content` field (unlike its
+                    // non-streaming endpoint, which embeds `<think>` tags
+                    // directly in `content` — see non_streaming_response's
+                    // split_reasoning comment). Missing this field meant every
+                    // reasoning token was silently dropped: never forwarded,
+                    // never logged, and — on a request whose whole max_tokens
+                    // budget went to reasoning — the client saw an empty
+                    // response with no explanation.
+                    if let Some(reasoning) = v["choices"][0]["delta"]["reasoning_content"].as_str()
+                    {
+                        if !reasoning.is_empty() {
+                            if completion_tokens == 0 {
+                                completion_tokens += 1;
+                            }
+                            if tx
+                                .send(GenerateEvent::Reasoning(reasoning.to_string()))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                    }
+
                     if let Some(content) = v["choices"][0]["delta"]["content"].as_str() {
                         if !content.is_empty() {
                             if completion_tokens == 0 {
@@ -230,7 +255,7 @@ pub async fn spawn_tracked_reader(
 
         while let Some(event) = stream.next().await {
             match &event {
-                GenerateEvent::Token(_) => {
+                GenerateEvent::Token(_) | GenerateEvent::Reasoning(_) => {
                     if first_token {
                         ttft_ms = start.elapsed().as_millis() as u64;
                         first_token = false;

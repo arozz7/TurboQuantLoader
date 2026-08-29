@@ -399,7 +399,13 @@ fn streaming_response(
         let mut model_stream = ReceiverStream::new(rx);
         while let Some(model_event) = model_stream.next().await {
             match model_event {
-                GenerateEvent::Token(text) => {
+                // The Anthropic Messages API has its own native "thinking"
+                // content-block type; wiring that up is out of scope here.
+                // For now, treat reasoning text the same as regular content
+                // so it's visible to the client rather than silently dropped
+                // (see GenerateEvent::Reasoning's doc comment for why this
+                // now arrives as a separate event at all).
+                GenerateEvent::Token(text) | GenerateEvent::Reasoning(text) => {
                     response_buf.push_str(&text);
                     let events = parser.push(&text);
                     if emit_parsed(
