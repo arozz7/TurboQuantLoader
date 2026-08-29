@@ -243,10 +243,45 @@ fn extract_value_after_key(buf: &str, key: &str) -> Option<String> {
     let rest = rest.strip_prefix('"').unwrap_or(rest);
     // Skip separator chars between key and value.
     let rest = rest.trim_start_matches(|c: char| c == ':' || c == '=' || c.is_whitespace());
-    // The value itself must still be a well-formed quoted string.
-    let rest = rest.strip_prefix('"')?;
+    // The value is usually its own well-formed quoted string (`"name": "bash"`),
+    // but can also share the key's own quote pair with no separate opening
+    // quote at all — e.g. `"function=read"` as a single JSON string literal,
+    // where key and value were merged instead of split into a proper pair.
+    // Either way, the value itself runs up to the next quote character.
+    let rest = rest.strip_prefix('"').unwrap_or(rest);
     let end = rest.find('"')?;
     Some(rest[..end].to_string())
+}
+
+/// Find the index of the `}` that closes the `{` at `open_idx`, accounting
+/// for nesting and braces inside quoted strings. `buf.rfind('}')` alone
+/// (the previous approach) picks the *last* `}` in the whole buffer, which
+/// is wrong whenever there's more than one JSON object in scope — e.g. an
+/// outer malformed wrapper around a well-formed nested `arguments` object,
+/// where the last `}` closes the *outer* object, not the one being scanned.
+fn find_matching_brace(buf: &str, open_idx: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, c) in buf.char_indices().skip(open_idx) {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' if in_string => escaped = true,
+            '"' => in_string = !in_string,
+            '{' if !in_string => depth += 1,
+            '}' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Try to parse a tool call JSON buffer into a [`ParsedEvent::ToolCallReady`].
@@ -316,25 +351,23 @@ fn try_parse_tool_call(buf: &str) -> Option<ParsedEvent> {
     let mut search_idx = 0;
     while let Some(start) = buf[search_idx..].find('{') {
         let abs_start = search_idx + start;
-        if let Some(end) = buf.rfind('}') {
-            if end >= abs_start {
-                let json_slice = &buf[abs_start..=end];
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_slice) {
-                    if let Some(obj) = parsed.as_object() {
-                        if obj.contains_key("arguments") {
-                            arguments = obj["arguments"].clone();
-                            break;
-                        } else if obj.contains_key("name")
-                            && obj.len() <= 2
-                            && !obj.contains_key("command")
-                        {
-                            // Probably parsed the outer shell successfully but it didn't contain anything useful
-                            // Just continue searching inner brackets!
-                        } else {
-                            // Direct arguments embedded (e.g., {"command": "..."})
-                            arguments = parsed;
-                            break;
-                        }
+        if let Some(end) = find_matching_brace(buf, abs_start) {
+            let json_slice = &buf[abs_start..=end];
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_slice) {
+                if let Some(obj) = parsed.as_object() {
+                    if obj.contains_key("arguments") {
+                        arguments = obj["arguments"].clone();
+                        break;
+                    } else if obj.contains_key("name")
+                        && obj.len() <= 2
+                        && !obj.contains_key("command")
+                    {
+                        // Probably parsed the outer shell successfully but it didn't contain anything useful
+                        // Just continue searching inner brackets!
+                    } else {
+                        // Direct arguments embedded (e.g., {"command": "..."})
+                        arguments = parsed;
+                        break;
                     }
                 }
             }
@@ -501,6 +534,39 @@ mod tests {
         );
         if let Some(ParsedEvent::ToolCallReady { name, .. }) = tool_evt {
             assert_eq!(name, "bash");
+        }
+    }
+
+    #[test]
+    fn tool_call_with_merged_key_and_value_recovers_name_and_arguments() {
+        // Observed in production 2026-08-29: model emitted `"function=read"`
+        // as a single JSON string literal — key and value merged inside one
+        // quote pair, not even a separate (if malformed) value token like
+        // the `"name="bash"` case above. Previously this fell all the way
+        // through to the raw-text fallback; both the name and the nested
+        // `arguments` object should now be recovered.
+        let mut p = StreamParser::new();
+        let evts = feed(
+            &mut p,
+            &[
+                "<tool_call>\n",
+                r#"{"function=read", "arguments": {"limit": 116, "offset": 20, "path": "J:/Projects/quake-remake/PLAN-phase2.md"}}"#,
+                "\n</tool_call>",
+            ],
+        );
+
+        let tool_evt = evts
+            .iter()
+            .find(|e| matches!(e, ParsedEvent::ToolCallReady { .. }));
+        assert!(
+            tool_evt.is_some(),
+            "expected a recovered tool call, got: {evts:?}"
+        );
+        if let Some(ParsedEvent::ToolCallReady { name, arguments }) = tool_evt {
+            assert_eq!(name, "read");
+            assert_eq!(arguments["limit"], 116);
+            assert_eq!(arguments["offset"], 20);
+            assert_eq!(arguments["path"], "J:/Projects/quake-remake/PLAN-phase2.md");
         }
     }
 
