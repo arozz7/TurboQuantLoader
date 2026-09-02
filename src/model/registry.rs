@@ -102,6 +102,7 @@ impl ModelRegistry {
     ///
     /// Returns `None` when the name is unknown in both sources.
     pub fn resolve(name: &str, config: &AppConfig) -> Option<ModelDefinition> {
+        let name = normalize_model_query(name);
         let lower = name.to_lowercase();
 
         // 1. Exact name match in registry.
@@ -124,7 +125,7 @@ impl ModelRegistry {
 
         // 3. Filesystem scan fallback — returns a synthetic definition with no overrides.
         if let Ok(entries) = Self::scan(&config.model.models_dir) {
-            if let Some(entry) = Self::find_by_name(&entries, name) {
+            if let Some(entry) = Self::find_by_name(&entries, &name) {
                 return Some(ModelDefinition {
                     name: entry.name.clone(),
                     path: entry.path.clone(),
@@ -150,10 +151,28 @@ impl ModelRegistry {
         if requested.is_empty() || requested.eq_ignore_ascii_case("local") {
             return true;
         }
+        let requested = normalize_model_query(requested);
         let req = requested.to_lowercase();
         let cur = current.to_lowercase();
         cur == req || cur.contains(&req)
     }
+}
+
+/// Reduces a client-supplied model identifier to its short name when it looks
+/// like a filesystem path.
+///
+/// Some clients (e.g. ones that previously talked to llama-server directly)
+/// cache model ids from llama.cpp's own `/v1/models`, which reports the full
+/// GGUF path rather than the short name TurboQuantLoader's registry and
+/// `/v1/models` use — a raw path would otherwise never match a short name
+/// via [`ModelRegistry::resolve`] or [`ModelRegistry::matches_current`].
+fn normalize_model_query(name: &str) -> String {
+    if name.contains('/') || name.contains('\\') {
+        if let Some(stem) = Path::new(name).file_stem().and_then(|s| s.to_str()) {
+            return stem.to_string();
+        }
+    }
+    name.to_string()
 }
 
 /// `true` when the path's filename begins with `"mmproj-"`.
@@ -285,5 +304,40 @@ mod tests {
         assert!(!is_split_continuation(Path::new(
             "/models/single-file.gguf"
         )));
+    }
+
+    #[test]
+    fn normalize_model_query_reduces_path_to_file_stem() {
+        assert_eq!(
+            normalize_model_query(
+                "J:/llama/Models/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_S.gguf"
+            ),
+            "Qwen3.8-27B-Q4_K_S"
+        );
+        assert_eq!(
+            normalize_model_query(r"J:\llama\Models\Qwen3.8-27B-Q4_K_S.gguf"),
+            "Qwen3.8-27B-Q4_K_S"
+        );
+    }
+
+    #[test]
+    fn normalize_model_query_leaves_short_names_untouched() {
+        assert_eq!(
+            normalize_model_query("Qwen3.8-27B-Q4_K_S"),
+            "Qwen3.8-27B-Q4_K_S"
+        );
+        assert_eq!(normalize_model_query("qwen3"), "qwen3");
+    }
+
+    #[test]
+    fn matches_current_accepts_full_path_for_loaded_model() {
+        assert!(ModelRegistry::matches_current(
+            "J:/llama/Models/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_S.gguf",
+            "Qwen3.8-27B-Q4_K_S"
+        ));
+        assert!(!ModelRegistry::matches_current(
+            "J:/llama/Models/unsloth/DeepSeek-V4-Flash.gguf",
+            "Qwen3.8-27B-Q4_K_S"
+        ));
     }
 }
