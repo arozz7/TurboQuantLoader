@@ -40,7 +40,7 @@ spec_draft_n_max     = 4
 # reasoning traces). These are overridden per-model via [models.load]; they
 # only apply directly here because Qwen3.8 is loaded via [model] rather than
 # through the [[models]] registry.
-chat_template_kwargs = { reasoning_effort = "high" }
+chat_template_kwargs = { reasoning_effort = "medium" }
 temperature          = 1.0
 top_p                = 0.95
 min_p                = 0.0
@@ -67,7 +67,8 @@ min_p                = 0.0
 # to its prior value and dropped --no-mmap entirely; kept everything else
 # from phase 13 (KV type split, spec_draft_n_max=4 + p-min) since those
 # showed real measured gains and aren't the implicated memory growth.
-extra_flags          = ["--flash-attn", "on", "--parallel", "1", "--ubatch-size", "2048", "--spec-draft-p-min", "0.75"]
+# changed batch size from 2048 to 512 which appears to be working well.  We can test again later.
+extra_flags          = ["--flash-attn", "on", "--parallel", "1", "--ubatch-size", "512", "--spec-draft-p-min", "0.75"]
 
 [model]
 # ── Path configuration (platform-specific — override in config.local.toml) ───
@@ -105,7 +106,7 @@ context_size = 131072
 # (sergiiob.dev "-b 8192"); reverted alongside --ubatch-size and --no-mmap
 # after repeated bad_alloc crashes during a live agent session — see
 # extra_flags comment above for the full incident.
-batch_size   = 4096
+batch_size   = 8192
 threads      = 8    # CPU threads for non-GPU ops; tune to your core count
 
 # model_idle_timeout_secs: seconds of inactivity required before a client-requested
