@@ -40,6 +40,7 @@ impl TokenStream {
         loop {
             match self.rx.recv().await {
                 Some(GenerateEvent::Token(tok)) => text.push_str(&tok),
+                Some(GenerateEvent::Reasoning(tok)) => text.push_str(&tok),
                 Some(GenerateEvent::Done(summary)) => return Ok((text, summary)),
                 Some(GenerateEvent::Error(e)) => return Err(e),
                 None => return Err("stream closed without a Done event".into()),

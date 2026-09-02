@@ -160,6 +160,9 @@ impl AppState {
         if let Some(split) = def.tensor_split {
             new_config.model.tensor_split = split;
         }
+        if let Some(load) = def.load {
+            apply_load_overrides(&mut new_config, load);
+        }
         let new_config = Arc::new(new_config);
 
         let state = self.clone();
@@ -191,6 +194,38 @@ impl AppState {
         });
 
         true
+    }
+}
+
+/// Merge a resolved model's `[models.load]` overrides onto a cloned config's
+/// `[backend]` section. `Some` fields win; `None` leaves the existing
+/// `[backend]` global value untouched. Shared by [`AppState::trigger_model_switch`]
+/// so the merge behavior can't drift between call sites that resolve a
+/// [`crate::config::ModelDefinition`] before starting `llama-server`.
+fn apply_load_overrides(config: &mut AppConfig, load: crate::config::LoadConfig) {
+    if let Some(spec_type) = load.spec_type {
+        config.backend.spec_type = Some(spec_type);
+    }
+    if let Some(n_max) = load.spec_draft_n_max {
+        config.backend.spec_draft_n_max = Some(n_max);
+    }
+    if let Some(draft_model) = load.draft_model {
+        config.backend.draft_model = Some(draft_model);
+    }
+    if let Some(kwargs) = load.chat_template_kwargs {
+        config.backend.chat_template_kwargs = Some(kwargs);
+    }
+    if let Some(temperature) = load.temperature {
+        config.backend.temperature = Some(temperature);
+    }
+    if let Some(top_p) = load.top_p {
+        config.backend.top_p = Some(top_p);
+    }
+    if let Some(min_p) = load.min_p {
+        config.backend.min_p = Some(min_p);
+    }
+    if !load.extra_flags.is_empty() {
+        config.backend.extra_flags.extend(load.extra_flags);
     }
 }
 

@@ -19,7 +19,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{fmt, EnvFilter};
 
-use config::{load_from_file, AppConfig, CliOverrides, KvBits, KvCacheConfig, LoggingConfig};
+use config::{load_from_file, AppConfig, CliOverrides, KvCacheConfig, KvType, LoggingConfig};
 use inference::engine::{ChatMessage, ChatRequest, InferenceEngine};
 use model::backend::{GenerateEvent, SamplerParams};
 use model::registry::ModelRegistry;
@@ -67,9 +67,14 @@ struct ServeArgs {
     /// Override the number of GPU layers to offload; `-1` offloads all (overrides `config.toml`).
     #[arg(long)]
     n_gpu_layers: Option<i32>,
-    /// Override the KV cache bit-width: `2`, `3`, `4`, or `8` (overrides `config.toml`).
+    /// Override the K cache type: `f32`, `f16`, `bf16`, `q8_0`, `q4_0`, `q4_1`,
+    /// `iq4_nl`, `q5_0`, or `q5_1` (overrides `config.toml`).
     #[arg(long)]
-    kv_bits: Option<u8>,
+    kv_type_k: Option<String>,
+    /// Override the V cache type: same accepted values as `--kv-type-k`
+    /// (overrides `config.toml`).
+    #[arg(long)]
+    kv_type_v: Option<String>,
 }
 
 #[derive(Parser)]
@@ -87,9 +92,10 @@ struct BenchArgs {
     /// Comma-separated context sizes to benchmark (e.g. `1024,8192,32768`).
     #[arg(long, default_value = "1024,8192,32768")]
     context_sizes: String,
-    /// Comma-separated KV bit-widths to benchmark (e.g. `4,8`).
-    #[arg(long, default_value = "4,8")]
-    bits: String,
+    /// Comma-separated KV cache types to benchmark, applied to both K and V
+    /// (e.g. `f16,q8_0,q4_0`).
+    #[arg(long, default_value = "f16,q8_0,q4_0")]
+    kv_types: String,
     /// Write benchmark results to this JSON file.
     #[arg(short, long)]
     output: Option<PathBuf>,
@@ -143,18 +149,26 @@ async fn main() -> Result<()> {
 // ─── Override builders ────────────────────────────────────────────────────────
 
 fn serve_overrides(args: &ServeArgs) -> Result<CliOverrides> {
-    let kv_bits = args
-        .kv_bits
-        .map(KvBits::try_from)
+    let kv_type_k = args
+        .kv_type_k
+        .as_deref()
+        .map(str::parse)
         .transpose()
-        .map_err(|e| anyhow::anyhow!("--kv-bits: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("--kv-type-k: {e}"))?;
+    let kv_type_v = args
+        .kv_type_v
+        .as_deref()
+        .map(str::parse)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("--kv-type-v: {e}"))?;
 
     Ok(CliOverrides {
         model_path: args.model.clone(),
         port: args.port,
         context_size: args.context_size,
         n_gpu_layers: args.n_gpu_layers,
-        kv_bits,
+        kv_type_k,
+        kv_type_v,
     })
 }
 
@@ -237,6 +251,11 @@ async fn cmd_run(config: AppConfig) -> Result<()> {
                     std::io::stdout().flush()?;
                     response.push_str(&tok);
                 }
+                Some(GenerateEvent::Reasoning(tok)) => {
+                    print!("{tok}");
+                    std::io::stdout().flush()?;
+                    response.push_str(&tok);
+                }
                 Some(GenerateEvent::Done(summary)) => {
                     println!();
                     info!(
@@ -265,7 +284,7 @@ async fn cmd_run(config: AppConfig) -> Result<()> {
     Ok(())
 }
 
-/// Benchmark (context_size × kv_bits) combinations against a fixed prompt.
+/// Benchmark (context_size × kv_type) combinations against a fixed prompt.
 ///
 /// The model is loaded once; each combination only rebuilds the `LlamaContext`
 /// (~50 ms). Results are printed as a table and optionally written to JSON.
@@ -281,15 +300,13 @@ async fn cmd_bench(config: AppConfig, args: BenchArgs) -> Result<()> {
         })
         .collect::<Result<_>>()?;
 
-    let kv_bits_list: Vec<KvBits> = args
-        .bits
+    let kv_types_list: Vec<KvType> = args
+        .kv_types
         .split(',')
         .map(|s| {
-            let n: u8 = s
-                .trim()
-                .parse()
-                .map_err(|_| anyhow::anyhow!("invalid kv_bits: '{}'", s.trim()))?;
-            KvBits::try_from(n).map_err(|e| anyhow::anyhow!("{e}"))
+            s.trim()
+                .parse::<KvType>()
+                .map_err(|e| anyhow::anyhow!("{e}"))
         })
         .collect::<Result<_>>()?;
 
@@ -304,10 +321,10 @@ async fn cmd_bench(config: AppConfig, args: BenchArgs) -> Result<()> {
 
     // ── Load model ────────────────────────────────────────────────────────────
     println!(
-        "Benchmarking: {} context sizes × {} kv_bits = {} configurations\n",
+        "Benchmarking: {} context sizes × {} kv_types = {} configurations\n",
         context_sizes.len(),
-        kv_bits_list.len(),
-        context_sizes.len() * kv_bits_list.len()
+        kv_types_list.len(),
+        context_sizes.len() * kv_types_list.len()
     );
     println!("Loading model: {}", config.model.model_path.display());
 
@@ -320,14 +337,14 @@ async fn cmd_bench(config: AppConfig, args: BenchArgs) -> Result<()> {
     // ── Print table header ────────────────────────────────────────────────────
     println!(
         "{:<12} {:<8} {:>8} {:>10} {:>10}",
-        "ctx_size", "kv_bits", "tokens", "tps", "ctx_used"
+        "ctx_size", "kv_type", "tokens", "tps", "ctx_used"
     );
     println!("{}", "-".repeat(52));
 
     #[derive(serde::Serialize)]
     struct BenchRow {
         ctx_size: u32,
-        kv_bits: u8,
+        kv_type: String,
         tokens_generated: u32,
         tokens_per_second: f32,
         context_tokens: u32,
@@ -336,9 +353,10 @@ async fn cmd_bench(config: AppConfig, args: BenchArgs) -> Result<()> {
 
     // ── Run combinations ──────────────────────────────────────────────────────
     for &ctx_size in &context_sizes {
-        for &bits in &kv_bits_list {
+        for &kv_type in &kv_types_list {
             let kv_cfg = KvCacheConfig {
-                bits,
+                type_k: kv_type,
+                type_v: kv_type,
                 ..KvCacheConfig::default()
             };
 
@@ -350,8 +368,8 @@ async fn cmd_bench(config: AppConfig, args: BenchArgs) -> Result<()> {
             };
             if let Err(e) = reconf_result {
                 eprintln!(
-                    "  skip ctx={ctx_size} bits={}: reconfigure failed: {e}",
-                    u8::from(bits)
+                    "  skip ctx={ctx_size} kv_type={}: reconfigure failed: {e}",
+                    kv_type.as_cli_str()
                 );
                 continue;
             }
@@ -374,12 +392,16 @@ async fn cmd_bench(config: AppConfig, args: BenchArgs) -> Result<()> {
             loop {
                 match stream.next_event().await {
                     Some(GenerateEvent::Token(_)) => {}
+                    Some(GenerateEvent::Reasoning(_)) => {}
                     Some(GenerateEvent::Done(s)) => {
                         summary_opt = Some(s);
                         break;
                     }
                     Some(GenerateEvent::Error(e)) => {
-                        eprintln!("  error ctx={ctx_size} bits={}: {e}", u8::from(bits));
+                        eprintln!(
+                            "  error ctx={ctx_size} kv_type={}: {e}",
+                            kv_type.as_cli_str()
+                        );
                         break;
                     }
                     None => break,
@@ -390,14 +412,14 @@ async fn cmd_bench(config: AppConfig, args: BenchArgs) -> Result<()> {
                 println!(
                     "{:<12} {:<8} {:>8} {:>10.1} {:>10}",
                     ctx_size,
-                    u8::from(bits),
+                    kv_type.as_cli_str(),
                     summary.tokens_generated,
                     summary.tokens_per_second,
                     summary.context_tokens,
                 );
                 rows.push(BenchRow {
                     ctx_size,
-                    kv_bits: u8::from(bits),
+                    kv_type: kv_type.as_cli_str().to_string(),
                     tokens_generated: summary.tokens_generated,
                     tokens_per_second: summary.tokens_per_second,
                     context_tokens: summary.context_tokens,

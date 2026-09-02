@@ -15,18 +15,70 @@ binary_path          = "J:/llama/llama-server.exe"
 internal_port        = 7433
 startup_timeout_secs = 180
 restart_on_crash     = true
-# Extra CLI flags appended verbatim. Flash-attn enabled. (MTP speculative decoding disabled for Vulkan compatibility).
-extra_flags          = ["--flash-attn", "on", "--spec-type", "none"]
+# Global default speculative-decoding flags — confirmed working on Vulkan with
+# llama.cpp b10488+ against Qwen3.8-27B's built-in nextn draft head (~77% draft
+# acceptance rate observed). Override per-model via [models.load] for models
+# needing a different --spec-type (e.g. "draft-dspark" with an external
+# draft_model file, instead of the built-in MTP head).
+# spec_draft_n_max / p-min: a published recipe for Qwen3.6-27B on this same
+# Arc B70 GPU (sergiiob.dev "Full Recipe") pairs n_max=4 with
+# --spec-draft-p-min 0.75 (below, in extra_flags) and reports 93-94% draft
+# acceptance — much higher than the ~50-60% we saw testing n_max=1/2 alone.
+# The likely mechanism: p-min gates out low-confidence draft proposals
+# before they're offered, so raising n_max no longer tanks acceptance the
+# way it does unguarded (Unsloth's docs warn n_max=4 drops to ~50% without
+# such a gate). Testing the pair together. Revert n_max to 1-2 and drop
+# --spec-draft-p-min if acceptance doesn't improve.
+spec_type            = "draft-mtp"
+spec_draft_n_max     = 4
+
+# Sampling defaults for the active default model (Qwen3.8-27B, [model] section
+# below) — Unsloth's documented Thinking Mode values (docs/models/qwen3.8).
+# Qwen3.8 is a hybrid thinking model; reasoning_effort "xhigh" is used here
+# for coding/research prompting since the dual-GPU setup has headroom to
+# spare (options: xhigh | high | medium | low | none — lower = faster/shorter
+# reasoning traces). These are overridden per-model via [models.load]; they
+# only apply directly here because Qwen3.8 is loaded via [model] rather than
+# through the [[models]] registry.
+chat_template_kwargs = { reasoning_effort = "medium" }
+temperature          = 1.0
+top_p                = 0.95
+min_p                = 0.0
+
+# Extra CLI flags appended verbatim to every model, regardless of [models.load].
+# --parallel 1: real usage is single-stream (only one slot is ever actually
+# busy — confirmed in logs) — 2 slots halved n_ctx_slot for no concurrency
+# benefit and duplicated recurrent-state/speculative-context buffers for a
+# second stream that's never used. Revert to 2 if concurrent requests are
+# ever actually needed.
+# --spec-draft-p-min 0.75: paired with spec_draft_n_max=4 above — see comment
+# there. Not a typed [backend] field yet since it's global-only (extra_flags
+# has no per-model override), unlike spec_draft_n_max.
+#
+# REVERTED 2026-08-25: --ubatch-size was bumped to 4096 and --no-mmap was
+# added, both from the same Arc B70 recipe, both explicitly flagged there as
+# "untested here". Within a live agent session this caused repeated
+# `bad allocation` crashes during decode (llama-server's prompt-cache
+# subsystem self-reduced its budget from a normal size down to 180 MiB in
+# reaction to a real allocation failure, then every subsequent request hit
+# the same wall with less headroom each time until a fatal GGML_ASSERT
+# killed the process). Confirmed not caused by another process contending
+# for VRAM (LM Studio killed, crash still reproduced). Reverted ubatch-size
+# to its prior value and dropped --no-mmap entirely; kept everything else
+# from phase 13 (KV type split, spec_draft_n_max=4 + p-min) since those
+# showed real measured gains and aren't the implicated memory growth.
+# changed batch size from 2048 to 512 which appears to be working well.  We can test again later.
+extra_flags          = ["--flash-attn", "on", "--parallel", "1", "--ubatch-size", "512", "--spec-draft-p-min", "0.75"]
 
 [model]
 # ── Path configuration (platform-specific — override in config.local.toml) ───
 # Current dev machine (Windows):
-model_path   = "J:/llama/Models/unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q4_K_S.gguf"
+model_path   = "J:/llama/Models/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_S.gguf"
 # macOS example:   model_path = "/Users/you/llama/Models/..."
 # Linux example:   model_path = "/home/you/llama/Models/..."
 # Env override:    TQL_MODEL_PATH=/path/to/model.gguf
 #
-# mmproj_path = "J:/llama/Models/unsloth/Qwen3.6-27B-MTP-GGUF/mmproj-F32.gguf"  # vision
+mmproj_path = "J:/llama/Models/unsloth/Qwen3.8-27B-GGUF/mmproj-F16.gguf"  # vision
 
 models_dir   = "J:/llama/Models"   # root dir for `list` command; override per-platform
 
@@ -40,13 +92,21 @@ n_gpu_layers = -1
 main_gpu = 1
 
 # tensor_split: only set this if you need to split across GPUs.
-# Qwen3.6-27B Q6_K (~22 GB) fits entirely on Arc B70 (32 GB) — no split needed.
-# If 262k context KV cache overflows Arc B70, uncomment and set weights:
+# Qwen3.8-27B Q4_K_S (~16 GB) fits entirely on Arc B70 (32 GB) — no split needed.
+# Its hybrid Gated DeltaNet attention (48/64 layers) also uses ~1/4 the KV cache
+# of a dense 27B at the same context, so headroom is larger than Qwen3.6 gave us.
+# If context KV cache overflows Arc B70, uncomment and set weights:
 # tensor_split = [16.0, 32.0]
 
-# context_size: max supported by Qwen3.6 model
-context_size = 262144
-batch_size   = 4096
+# context_size: native window for Qwen3.8-27B (extensible to 1M if needed)
+# Halved from 262144 to leave VRAM headroom while the full model sits on
+# the Arc B70 alone (RTX 4070 Ti Super currently idle, no tensor split).
+context_size = 131072
+# REVERTED 2026-08-25: was bumped to 8192 to match the same Arc B70 recipe
+# (sergiiob.dev "-b 8192"); reverted alongside --ubatch-size and --no-mmap
+# after repeated bad_alloc crashes during a live agent session — see
+# extra_flags comment above for the full incident.
+batch_size   = 8192
 threads      = 8    # CPU threads for non-GPU ops; tune to your core count
 
 # model_idle_timeout_secs: seconds of inactivity required before a client-requested
@@ -56,9 +116,23 @@ threads      = 8    # CPU threads for non-GPU ops; tune to your core count
 model_idle_timeout_secs = 1800   # 30 minutes
 
 [kv_cache]
-# bits: 2 | 3 | 4 | 8
-# 4-bit (Q4_0) = ~3.9x compression, near-zero quality loss — recommended default
-bits             = 8
+# type_k / type_v: "f32" | "f16" | "bf16" | "q8_0" | "q4_0" | "q4_1" | "iq4_nl" | "q5_0" | "q5_1"
+# CHANGED 2026-08-28: switched from q8_0/q4_1 to f16/f16 after a matched-depth
+# A/B/C test at 83,098 prompt tokens (~63% of the 131072 context) against this
+# same Arc B70. The earlier q8_0/K + q4_1/V split (a sergiiob.dev recipe) was
+# assumed to be a speed win; measured, it was not:
+#   q8_0/q4_1: decode 4.31 tok/s, prefill  72.8 tok/s, draft accept 91.1%, VRAM 21.5 GB idle
+#   f16/f16:   decode 3.87 tok/s, prefill 132.0 tok/s, draft accept 97.0%, VRAM ~26.2 GB
+#   f16/q8_0:  decode 3.47 tok/s, prefill  95.0 tok/s, draft accept 92.7%, VRAM ~24.3 GB (dominated — worse than both above, skip)
+# Quantized KV was ~10% faster at raw decode but 44% slower at prefill (which
+# dominates wall-clock on large prompts) and had meaningfully worse MTP draft
+# acceptance. f16/f16 uses ~4.7 GB more VRAM (20% headroom left on the 32 GB
+# B70 vs. 34% for q8_0/q4_1), but that headroom is fixed at model-load time —
+# llama-server pre-allocates the KV buffer for the full --ctx-size up front,
+# so VRAM does NOT grow further as a session's actual token count increases
+# toward 131072. It is a one-time budget check, not a growing risk.
+type_k           = "f16"
+type_v           = "f16"
 # strategy: "llama_native" | "turbo_quant"
 strategy         = "llama_native"
 # memory_budget_mb = 4096   # optional cap; omit for unlimited
@@ -90,19 +164,35 @@ log_conversations    = true
 #   3. File-stem substring scan of `models_dir`
 #   4. Unknown → serve with currently loaded model (no switch)
 
+# Qwen3.6 sampling below is Unsloth's documented "Precise Coding Tasks" row
+# (thinking mode) — lower temperature than the general-purpose thinking
+# defaults for tighter, more deterministic code/research output
+# (docs/models/qwen3.6). spec_type/spec_draft_n_max are omitted since they
+# match the [backend] globals above (draft-mtp, n_max 2) — no override needed.
+
 [[models]]
 name          = "Qwen3.6-27b-Q4_K_S"
 path          = "J:/llama/Models/unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q4_K_S.gguf"
-context_size  = 262144
+context_size  = 131072
 n_gpu_layers  = -1
 main_gpu      = 1
+[models.load]
+chat_template_kwargs = { enable_thinking = true }
+temperature           = 0.6
+top_p                 = 0.95
+min_p                 = 0.0
 
 [[models]]
 name          = "Qwen3.6-27B-Q6_K"
 path          = "J:/llama/Models/unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q6_K.gguf"
-context_size  = 262144
+context_size  = 131072
 n_gpu_layers  = -1
 main_gpu      = 1
+[models.load]
+chat_template_kwargs = { enable_thinking = true }
+temperature           = 0.6
+top_p                 = 0.95
+min_p                 = 0.0
 
 # Example: add more models below as needed.
 # [[models]]
@@ -110,3 +200,29 @@ main_gpu      = 1
 # path         = "J:/llama/Models/Meta-Llama-3-8B-Instruct.Q5_K_M.gguf"
 # context_size = 8192
 # main_gpu     = 0
+
+# DeepSeek-V4-Flash-0731 (UD-IQ3_XXS, ~104 GB across 4 shards) + DSpark drafter
+# (~10.9 GB) — external drafter instead of the built-in MTP head
+# (docs/models/deepseek-v4). `path` points at the first shard; llama-server
+# auto-loads the other 3 (…-00002-of-00004.gguf etc.) from the same directory.
+#
+# Weights (~104 GB) + drafter (~11 GB) exceed the 48 GB combined VRAM
+# (16 GB RTX 4070 Ti Super + 32 GB Arc B70), so most layers run on CPU —
+# this machine has 128 GB RAM, comfortably enough to hold the remainder.
+# n_gpu_layers below is a conservative starting point per the doc's own
+# example; raise it (watch llama-server's startup VRAM log) until GPU memory
+# is nearly exhausted, then leave headroom for the KV cache.
+[[models]]
+name         = "DeepSeek-V4-Flash-0731"
+path         = "J:/llama/Models/unsloth/DeepSeek-V4-Flash-0731-GGUF/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf"
+context_size = 131072   # doc default is 32768; raise as RAM allows (max 1,048,576)
+n_gpu_layers = 2        # doc's conservative example — tune upward once loaded once and VRAM headroom is known
+tensor_split = [16.0, 32.0]   # split offloaded layers across both GPUs by VRAM weight
+[models.load]
+spec_type             = "draft-dspark"
+spec_draft_n_max      = 3   # doc-recommended default — ~1.9x faster inference
+draft_model           = "J:/llama/Models/unsloth/DeepSeek-V4-Flash-0731-GGUF/dspark-DeepSeek-V4-Flash-0731-Q8_0.gguf"
+temperature            = 1.0
+top_p                  = 0.95   # doc's agentic/coding value (0.95) over the standard 1.0, for coding/research use
+min_p                  = 0.01
+chat_template_kwargs   = { reasoning_effort = "high" }   # "max" for deepest reasoning; "high" ("Think High") is the doc default

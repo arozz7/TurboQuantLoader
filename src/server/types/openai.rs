@@ -71,9 +71,23 @@ pub struct ChatCompletionRequest {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub top_k: Option<u32>,
+    pub min_p: Option<f32>,
     #[allow(dead_code)]
     pub seed: Option<u64>,
     pub tools: Option<Vec<serde_json::Value>>,
+    /// OpenAI streaming convention: when `include_usage` is set, an extra
+    /// final chunk with empty `choices` and a populated `usage` object is
+    /// sent before `[DONE]`. Opt-in — clients that don't ask for it (like our
+    /// own coding-agent) never see the extra chunk, since some naive parsers
+    /// assume `choices` is never empty.
+    #[serde(default)]
+    pub stream_options: Option<StreamOptions>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StreamOptions {
+    #[serde(default)]
+    pub include_usage: bool,
 }
 
 fn default_max_tokens() -> u32 {
@@ -82,8 +96,7 @@ fn default_max_tokens() -> u32 {
 
 // ── Non-streaming response ────────────────────────────────────────────────────
 
-#[allow(dead_code)]
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
@@ -143,6 +156,14 @@ pub struct DeltaMessage {
     pub role: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// Chain-of-thought text, streamed separately from `content` per the
+    /// reasoning-model convention used by llama.cpp, vLLM, LM Studio, and
+    /// OpenRouter/DeepSeek — lets clients that declare reasoning support
+    /// (e.g. a `reasoning: true` model entry) distinguish "still thinking"
+    /// from the actual answer instead of receiving both interleaved in
+    /// `content`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallInfo>>,
 }
@@ -161,4 +182,8 @@ pub struct ChatCompletionChunk {
     pub created: u64,
     pub model: String,
     pub choices: Vec<StreamChoice>,
+    /// Only populated on the final usage-only chunk (empty `choices`) sent
+    /// when the request set `stream_options.include_usage`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
 }

@@ -119,6 +119,7 @@ pub async fn spawn_event_reader(
         let mut stream = response.bytes_stream();
         let mut completion_tokens: u32 = 0;
         let mut prompt_tokens: u32 = 0;
+        let mut cached_tokens: u32 = 0;
         let mut finish_reason_str = String::from("stop");
 
         while let Some(chunk) = stream.next().await {
@@ -153,11 +154,42 @@ pub async fn spawn_event_reader(
                     if let Some(usage) = v.get("usage").filter(|u| !u.is_null()) {
                         prompt_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0) as u32;
                         completion_tokens = usage["completion_tokens"].as_u64().unwrap_or(0) as u32;
+                        // llama.cpp ≥ b3900 reports cached tokens under prompt_tokens_details;
+                        // older builds may use the top-level tokens_cached field.
+                        cached_tokens = usage["prompt_tokens_details"]["cached_tokens"]
+                            .as_u64()
+                            .or_else(|| usage["tokens_cached"].as_u64())
+                            .unwrap_or(0) as u32;
                     }
 
                     if let Some(fr) = v["choices"][0]["finish_reason"].as_str() {
                         if !fr.is_empty() && fr != "null" {
                             finish_reason_str = fr.to_string();
+                        }
+                    }
+
+                    // llama-server's streaming endpoint reports reasoning via a
+                    // separate `delta.reasoning_content` field (unlike its
+                    // non-streaming endpoint, which embeds `<think>` tags
+                    // directly in `content` — see non_streaming_response's
+                    // split_reasoning comment). Missing this field meant every
+                    // reasoning token was silently dropped: never forwarded,
+                    // never logged, and — on a request whose whole max_tokens
+                    // budget went to reasoning — the client saw an empty
+                    // response with no explanation.
+                    if let Some(reasoning) = v["choices"][0]["delta"]["reasoning_content"].as_str()
+                    {
+                        if !reasoning.is_empty() {
+                            if completion_tokens == 0 {
+                                completion_tokens += 1;
+                            }
+                            if tx
+                                .send(GenerateEvent::Reasoning(reasoning.to_string()))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
                         }
                     }
 
@@ -185,6 +217,7 @@ pub async fn spawn_event_reader(
                 context_tokens: prompt_tokens + completion_tokens,
                 tokens_per_second: 0.0,
                 finish_reason: finish_reason_str,
+                cached_tokens,
             }))
             .await;
     });
@@ -222,7 +255,7 @@ pub async fn spawn_tracked_reader(
 
         while let Some(event) = stream.next().await {
             match &event {
-                GenerateEvent::Token(_) => {
+                GenerateEvent::Token(_) | GenerateEvent::Reasoning(_) => {
                     if first_token {
                         ttft_ms = start.elapsed().as_millis() as u64;
                         first_token = false;
@@ -263,6 +296,7 @@ pub async fn spawn_tracked_reader(
                             prompt_tokens: prompt,
                             completion_tokens: tokens,
                             finish_reason: summary.finish_reason.clone(),
+                            cached_tokens: summary.cached_tokens,
                         })
                         .await;
                 }
@@ -295,13 +329,14 @@ pub fn build_chat_body(
     temperature: f32,
     top_p: f32,
     top_k: u32,
+    min_p: Option<f32>,
 ) -> Vec<u8> {
     let msgs: Vec<serde_json::Value> = messages
         .iter()
         .map(|(role, content)| serde_json::json!({"role": role, "content": content}))
         .collect();
 
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": "local",
         "messages": msgs,
         "stream": stream,
@@ -311,6 +346,10 @@ pub fn build_chat_body(
         "top_k": top_k,
         "stream_options": {"include_usage": true},
     });
+
+    if let Some(min_p) = min_p {
+        body["min_p"] = serde_json::json!(min_p);
+    }
 
     serde_json::to_vec(&body).unwrap_or_default()
 }

@@ -24,7 +24,7 @@ use crate::server::sse::{data_event, sse_response};
 use crate::server::stream_parser::{ParsedEvent, StreamParser};
 use crate::server::types::openai::{
     ChatCompletionChunk, ChatCompletionRequest, DeltaMessage, StreamChoice, ToolCallFunction,
-    ToolCallInfo,
+    ToolCallInfo, Usage,
 };
 use crate::server::AppState;
 
@@ -69,9 +69,10 @@ pub async fn chat_completions(
 
     let messages = prepare_messages(&req);
     let url = format!("{}/v1/chat/completions", proc.base_url());
-    let temperature = req.temperature.unwrap_or(0.6);
-    let top_p = req.top_p.unwrap_or(0.95);
+    let temperature = req.temperature.or(cfg.backend.temperature).unwrap_or(0.6);
+    let top_p = req.top_p.or(cfg.backend.top_p).unwrap_or(0.95);
     let top_k = req.top_k.unwrap_or(20);
+    let min_p = req.min_p.or(cfg.backend.min_p);
 
     let request_id = new_id("chatcmpl");
 
@@ -95,7 +96,15 @@ pub async fn chat_completions(
         .collect();
 
     if req.stream {
-        let body = build_chat_body(&messages, true, req.max_tokens, temperature, top_p, top_k);
+        let body = build_chat_body(
+            &messages,
+            true,
+            req.max_tokens,
+            temperature,
+            top_p,
+            top_k,
+            min_p,
+        );
         let rx = spawn_tracked_reader(
             proc.http_client(),
             &url,
@@ -104,15 +113,29 @@ pub async fn chat_completions(
             model_name.clone(),
         )
         .await?;
+        let include_usage = req
+            .stream_options
+            .as_ref()
+            .map(|o| o.include_usage)
+            .unwrap_or(false);
         Ok(streaming_response(
             rx,
             model_name,
             request_id,
             log_messages,
             state.conv_logger.clone(),
+            include_usage,
         ))
     } else {
-        let body = build_chat_body(&messages, false, req.max_tokens, temperature, top_p, top_k);
+        let body = build_chat_body(
+            &messages,
+            false,
+            req.max_tokens,
+            temperature,
+            top_p,
+            top_k,
+            min_p,
+        );
         non_streaming_response(
             proc.http_client(),
             &url,
@@ -204,6 +227,7 @@ fn streaming_response(
     id: String,
     log_messages: Vec<LogMessage>,
     conv_logger: Arc<ConversationLogger>,
+    include_usage: bool,
 ) -> Response {
     let created = unix_now();
     let model_clone = model.clone();
@@ -220,10 +244,12 @@ fn streaming_response(
             delta: DeltaMessage {
                 role: Some("assistant"),
                 content: Some(String::new()),
+                reasoning_content: None,
                 tool_calls: None,
             },
             finish_reason: None,
         }],
+        usage: None,
     });
     let _ = tx.send(Ok::<_, Infallible>(first));
 
@@ -235,7 +261,7 @@ fn streaming_response(
         let emit_events = |events: Vec<ParsedEvent>, tx: &tokio::sync::mpsc::UnboundedSender<_>| {
             for evt in events {
                 match evt {
-                    ParsedEvent::TextToken(text) | ParsedEvent::ThinkingToken(text) => {
+                    ParsedEvent::TextToken(text) => {
                         let _ = tx.send(Ok::<_, Infallible>(data_event(&ChatCompletionChunk {
                             id: id.clone(),
                             object: "chat.completion.chunk",
@@ -246,10 +272,31 @@ fn streaming_response(
                                 delta: DeltaMessage {
                                     role: None,
                                     content: Some(text),
+                                    reasoning_content: None,
                                     tool_calls: None,
                                 },
                                 finish_reason: None,
                             }],
+                            usage: None,
+                        })));
+                    }
+                    ParsedEvent::ThinkingToken(text) => {
+                        let _ = tx.send(Ok::<_, Infallible>(data_event(&ChatCompletionChunk {
+                            id: id.clone(),
+                            object: "chat.completion.chunk",
+                            created,
+                            model: model_clone.clone(),
+                            choices: vec![StreamChoice {
+                                index: 0,
+                                delta: DeltaMessage {
+                                    role: None,
+                                    content: None,
+                                    reasoning_content: Some(text),
+                                    tool_calls: None,
+                                },
+                                finish_reason: None,
+                            }],
+                            usage: None,
                         })));
                     }
                     ParsedEvent::ThinkingEnd => {}
@@ -264,6 +311,7 @@ fn streaming_response(
                                 delta: DeltaMessage {
                                     role: None,
                                     content: None,
+                                    reasoning_content: None,
                                     tool_calls: Some(vec![ToolCallInfo {
                                         index: 0,
                                         id: Some(new_id("call")),
@@ -279,6 +327,7 @@ fn streaming_response(
                                 },
                                 finish_reason: None,
                             }],
+                            usage: None,
                         })));
                     }
                 }
@@ -297,6 +346,31 @@ fn streaming_response(
                         tool_called = true;
                     }
                     emit_events(evts, &tx);
+                }
+                GenerateEvent::Reasoning(text) => {
+                    // Already cleanly separated by llama-server (a native
+                    // `delta.reasoning_content` field) — no `<think>`-tag
+                    // parsing needed, so emit it directly instead of routing
+                    // through the StreamParser built for the non-streaming
+                    // endpoint's inline-tag format.
+                    response_buf.push_str(&text);
+                    let _ = tx.send(Ok::<_, Infallible>(data_event(&ChatCompletionChunk {
+                        id: id.clone(),
+                        object: "chat.completion.chunk",
+                        created,
+                        model: model_clone.clone(),
+                        choices: vec![StreamChoice {
+                            index: 0,
+                            delta: DeltaMessage {
+                                role: None,
+                                content: None,
+                                reasoning_content: Some(text),
+                                tool_calls: None,
+                            },
+                            finish_reason: None,
+                        }],
+                        usage: None,
+                    })));
                 }
                 GenerateEvent::Done(summary) => {
                     let evts = parser.flush();
@@ -345,11 +419,29 @@ fn streaming_response(
                             delta: DeltaMessage {
                                 role: None,
                                 content: None,
+                                reasoning_content: None,
                                 tool_calls: None,
                             },
                             finish_reason: Some(finish_reason),
                         }],
+                        usage: None,
                     })));
+
+                    if include_usage {
+                        let _ = tx.send(Ok::<_, Infallible>(data_event(&ChatCompletionChunk {
+                            id: id.clone(),
+                            object: "chat.completion.chunk",
+                            created,
+                            model: model_clone.clone(),
+                            choices: vec![],
+                            usage: Some(Usage {
+                                prompt_tokens,
+                                completion_tokens: summary.tokens_generated,
+                                total_tokens: summary.context_tokens,
+                            }),
+                        })));
+                    }
+
                     let _ = tx.send(Ok::<_, Infallible>(
                         axum::response::sse::Event::default().data("[DONE]"),
                     ));
@@ -416,14 +508,48 @@ async fn non_streaming_response(
         .await
         .map_err(|e| ApiError::from(anyhow::anyhow!("failed to read upstream body: {e}")))?;
 
+    // Default to the raw upstream bytes; replaced below if we successfully
+    // split out a reasoning block, so any parse failure just falls back to
+    // proxying llama-server's response verbatim (today's behavior).
+    let mut response_bytes = bytes.clone();
+
     if status.is_success() {
-        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-            let response_text = v["choices"][0]["message"]["content"]
+        if let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            let raw_content = v["choices"][0]["message"]["content"]
                 .as_str()
                 .unwrap_or("")
                 .to_string();
+            // llama-server doesn't separate reasoning from content for this
+            // chat template (confirmed empirically — <think> tags land
+            // unparsed in `content`), so split it out ourselves the same way
+            // the streaming path's StreamParser does, keeping non-streaming
+            // and streaming clients consistent on the reasoning_content
+            // convention. Does not touch <tool_call> handling — non-streaming
+            // tool-call parsing is unchanged from today.
+            let (visible_content, reasoning_content) = split_reasoning(&raw_content);
+            if let Some(message) = v["choices"][0]["message"].as_object_mut() {
+                message.insert(
+                    "content".to_string(),
+                    serde_json::Value::String(visible_content.clone()),
+                );
+                if let Some(reasoning) = reasoning_content {
+                    message.insert(
+                        "reasoning_content".to_string(),
+                        serde_json::Value::String(reasoning),
+                    );
+                }
+            }
+            if let Ok(rewritten) = serde_json::to_vec(&v) {
+                response_bytes = axum::body::Bytes::from(rewritten);
+            }
+
+            let response_text = raw_content;
             let prompt_tokens = v["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32;
             let completion_tokens = v["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32;
+            let cached_tokens = v["usage"]["prompt_tokens_details"]["cached_tokens"]
+                .as_u64()
+                .or_else(|| v["usage"]["tokens_cached"].as_u64())
+                .unwrap_or(0) as u32;
             let finish_reason = v["choices"][0]["finish_reason"]
                 .as_str()
                 .unwrap_or("stop")
@@ -434,6 +560,23 @@ async fn non_streaming_response(
             } else {
                 0.0
             };
+
+            // Mirrors spawn_tracked_reader's "request complete" line on the
+            // streaming path (src/server/proxy.rs) so both code paths are
+            // equally visible in the logs — non-streaming previously had no
+            // per-request summary line at all, only silent metrics.record().
+            // ttft_ms equals generation_ms here: a non-streaming response has
+            // no earlier partial signal, the whole body arrives at once.
+            tracing::info!(
+                model = %model_name,
+                prompt_tokens,
+                completion_tokens,
+                ttft_ms = generation_ms,
+                generation_ms,
+                tps = format!("{tps:.1}"),
+                finish_reason = %finish_reason,
+                "request complete"
+            );
 
             conv_logger.log(&ConversationEntry {
                 ts: now_iso8601(),
@@ -458,6 +601,7 @@ async fn non_streaming_response(
                     prompt_tokens,
                     completion_tokens,
                     finish_reason,
+                    cached_tokens,
                 })
                 .await;
         }
@@ -472,8 +616,31 @@ async fn non_streaming_response(
     Ok(axum::response::Response::builder()
         .status(status)
         .header(axum::http::header::CONTENT_TYPE, content_type)
-        .body(axum::body::Body::from(bytes))
+        .body(axum::body::Body::from(response_bytes))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()))
+}
+
+/// Split a `<think>...</think>` block out of a complete (non-streamed)
+/// response string, mirroring the tag [`StreamParser`] recognizes on the
+/// streaming path. Returns `(visible_content, reasoning_content)` — the
+/// second element is `None` when no thinking block is present or it's empty.
+fn split_reasoning(content: &str) -> (String, Option<String>) {
+    if let (Some(start), Some(end)) = (content.find("<think>"), content.find("</think>")) {
+        if end > start {
+            let reasoning = content[start + "<think>".len()..end].trim().to_string();
+            let mut visible = String::with_capacity(content.len());
+            visible.push_str(&content[..start]);
+            visible.push_str(&content[end + "</think>".len()..]);
+            let visible = visible.trim().to_string();
+            let reasoning = if reasoning.is_empty() {
+                None
+            } else {
+                Some(reasoning)
+            };
+            return (visible, reasoning);
+        }
+    }
+    (content.to_string(), None)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -512,4 +679,39 @@ fn unix_now() -> u64 {
 
 fn new_id(prefix: &str) -> String {
     format!("{}-{}", prefix, uuid::Uuid::new_v4())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_reasoning_extracts_think_block() {
+        let (visible, reasoning) = split_reasoning("<think>pondering</think>the answer");
+        assert_eq!(visible, "the answer");
+        assert_eq!(reasoning.as_deref(), Some("pondering"));
+    }
+
+    #[test]
+    fn split_reasoning_no_think_block_passes_through() {
+        let (visible, reasoning) = split_reasoning("just an answer");
+        assert_eq!(visible, "just an answer");
+        assert_eq!(reasoning, None);
+    }
+
+    #[test]
+    fn split_reasoning_empty_think_block_yields_no_reasoning() {
+        let (visible, reasoning) = split_reasoning("<think></think>the answer");
+        assert_eq!(visible, "the answer");
+        assert_eq!(reasoning, None);
+    }
+
+    #[test]
+    fn split_reasoning_preserves_tool_call_tags_in_visible_content() {
+        let (visible, reasoning) = split_reasoning(
+            "<think>need to read the file</think>\n<tool_call>\n{\"name\": \"Read\"}\n</tool_call>",
+        );
+        assert_eq!(reasoning.as_deref(), Some("need to read the file"));
+        assert!(visible.contains("<tool_call>"));
+    }
 }

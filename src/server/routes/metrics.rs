@@ -27,7 +27,22 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let (tps_p50, tps_p95, tps_p99) = state.metrics.tps_percentiles().await;
     let (ttft_p50, ttft_p95, ttft_p99) = state.metrics.ttft_percentiles().await;
     let (gen_p50, gen_p95, gen_p99) = state.metrics.generation_ms_percentiles().await;
+    let (ctx_p50, ctx_p95, ctx_p99) = state.metrics.context_size_percentiles().await;
     let (stop_count, length_count, tool_calls_count) = state.metrics.finish_reason_counts().await;
+    let max_context = state
+        .metrics
+        .max_context_tokens
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let avg_context = state.metrics.avg_context_tokens();
+    let total_cached = state
+        .metrics
+        .total_cached_tokens
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let total_prompt = state
+        .metrics
+        .total_prompt_tokens
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let cache_hit_rate = state.metrics.cache_hit_rate();
 
     let status = if backend_state == ProcessState::Ready {
         "ok"
@@ -89,6 +104,18 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
             "generation_p95_ms": gen_p95,
             "generation_p99_ms": gen_p99,
         },
+        "context": {
+            "max_tokens_alltime": max_context,
+            "avg_tokens_alltime": avg_context,
+            "p50_tokens_recent": ctx_p50,
+            "p95_tokens_recent": ctx_p95,
+            "p99_tokens_recent": ctx_p99,
+        },
+        "prompt_cache": {
+            "total_cached_tokens": total_cached,
+            "total_prompt_tokens": total_prompt,
+            "hit_rate_pct": (cache_hit_rate * 1000.0).round() / 10.0,
+        },
         "gpus": gpus,
     }))
 }
@@ -120,7 +147,18 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoRespo
     let (tps_p50, tps_p95, tps_p99) = state.metrics.tps_percentiles().await;
     let (ttft_p50, ttft_p95, ttft_p99) = state.metrics.ttft_percentiles().await;
     let (gen_p50, gen_p95, gen_p99) = state.metrics.generation_ms_percentiles().await;
+    let (ctx_p50, ctx_p95, ctx_p99) = state.metrics.context_size_percentiles().await;
     let (stop_count, length_count, tool_calls_count) = state.metrics.finish_reason_counts().await;
+    let max_context = state
+        .metrics
+        .max_context_tokens
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let avg_context = state.metrics.avg_context_tokens();
+    let total_cached = state
+        .metrics
+        .total_cached_tokens
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let cache_hit_rate = state.metrics.cache_hit_rate();
     let gpu_stats = state.metrics.gpu_stats.read().await.clone();
 
     let mut out = String::with_capacity(2048);
@@ -193,12 +231,44 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoRespo
     out.push_str("# TYPE tql_generation_p99_ms gauge\n");
     out.push_str(&format!("tql_generation_p99_ms {gen_p99}\n\n"));
 
+    out.push_str(
+        "# HELP tql_cached_tokens_total Cumulative prompt tokens served from KV prefix cache\n",
+    );
+    out.push_str("# TYPE tql_cached_tokens_total counter\n");
+    out.push_str(&format!("tql_cached_tokens_total {total_cached}\n\n"));
+
+    out.push_str("# HELP tql_cache_hit_rate Fraction of prompt tokens served from KV prefix cache (0.0-1.0)\n");
+    out.push_str("# TYPE tql_cache_hit_rate gauge\n");
+    out.push_str(&format!("tql_cache_hit_rate {cache_hit_rate:.4}\n\n"));
+
     out.push_str("# HELP tql_uptime_seconds Server uptime in seconds\n");
     out.push_str("# TYPE tql_uptime_seconds counter\n");
     out.push_str(&format!(
         "tql_uptime_seconds {}\n\n",
         state.metrics.uptime_secs()
     ));
+
+    out.push_str(
+        "# HELP tql_context_tokens_max Largest context (prompt+completion tokens) ever seen\n",
+    );
+    out.push_str("# TYPE tql_context_tokens_max gauge\n");
+    out.push_str(&format!("tql_context_tokens_max {max_context}\n\n"));
+
+    out.push_str("# HELP tql_context_tokens_avg Average context size (prompt+completion tokens) per request\n");
+    out.push_str("# TYPE tql_context_tokens_avg gauge\n");
+    out.push_str(&format!("tql_context_tokens_avg {avg_context:.1}\n\n"));
+
+    out.push_str("# HELP tql_context_p50 Context size p50 tokens (recent window)\n");
+    out.push_str("# TYPE tql_context_p50 gauge\n");
+    out.push_str(&format!("tql_context_p50 {ctx_p50}\n\n"));
+
+    out.push_str("# HELP tql_context_p95 Context size p95 tokens (recent window)\n");
+    out.push_str("# TYPE tql_context_p95 gauge\n");
+    out.push_str(&format!("tql_context_p95 {ctx_p95}\n\n"));
+
+    out.push_str("# HELP tql_context_p99 Context size p99 tokens (recent window)\n");
+    out.push_str("# TYPE tql_context_p99 gauge\n");
+    out.push_str(&format!("tql_context_p99 {ctx_p99}\n\n"));
 
     if !gpu_stats.is_empty() {
         out.push_str("# HELP tql_gpu_vram_used_mb GPU VRAM used (MB)\n");
@@ -249,7 +319,18 @@ pub async fn admin_stats(State(state): State<AppState>) -> impl IntoResponse {
     let (tps_p50, tps_p95, tps_p99) = state.metrics.tps_percentiles().await;
     let (ttft_p50, ttft_p95, ttft_p99) = state.metrics.ttft_percentiles().await;
     let (gen_p50, gen_p95, gen_p99) = state.metrics.generation_ms_percentiles().await;
+    let (ctx_p50, ctx_p95, ctx_p99) = state.metrics.context_size_percentiles().await;
     let (stop_count, length_count, tool_calls_count) = state.metrics.finish_reason_counts().await;
+    let max_context = state
+        .metrics
+        .max_context_tokens
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let avg_context = state.metrics.avg_context_tokens();
+    let total_cached = state
+        .metrics
+        .total_cached_tokens
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let cache_hit_rate = state.metrics.cache_hit_rate();
 
     let requests: Vec<serde_json::Value> = recent
         .iter()
@@ -260,6 +341,8 @@ pub async fn admin_stats(State(state): State<AppState>) -> impl IntoResponse {
                 "tokens_per_second": r.tokens_per_second,
                 "prompt_tokens": r.prompt_tokens,
                 "completion_tokens": r.completion_tokens,
+                "context_tokens": r.prompt_tokens + r.completion_tokens,
+                "cached_tokens": r.cached_tokens,
                 "finish_reason": r.finish_reason,
             })
         })
@@ -276,6 +359,18 @@ pub async fn admin_stats(State(state): State<AppState>) -> impl IntoResponse {
             "stop": stop_count,
             "length": length_count,
             "tool_calls": tool_calls_count,
+        },
+        "context": {
+            "max_tokens_alltime": max_context,
+            "avg_tokens_alltime": avg_context,
+            "p50_tokens_recent": ctx_p50,
+            "p95_tokens_recent": ctx_p95,
+            "p99_tokens_recent": ctx_p99,
+        },
+        "prompt_cache": {
+            "total_cached_tokens": total_cached,
+            "total_prompt_tokens": state.metrics.total_prompt_tokens.load(std::sync::atomic::Ordering::Relaxed),
+            "hit_rate_pct": (cache_hit_rate * 1000.0).round() / 10.0,
         },
         "percentiles": {
             "tps_p50": tps_p50,

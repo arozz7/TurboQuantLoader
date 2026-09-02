@@ -135,6 +135,7 @@ pub struct MessagesRequest {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub top_k: Option<u32>,
+    pub min_p: Option<f32>,
     /// Tool definitions sent by Claude Code — not yet forwarded to the model.
     /// Captured here so the handler can log and inspect them.
     #[serde(default)]

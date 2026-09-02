@@ -87,10 +87,16 @@ impl StreamParser {
         match &mut self.state {
             State::Thinking => events.push(ParsedEvent::ThinkingToken(text)),
             State::ToolCall { buffer } => {
-                // Incomplete tool call â€” best-effort: try to parse what we have.
+                // Incomplete tool call — best-effort: try to parse what we have.
                 buffer.push_str(&text);
                 if let Some(evt) = try_parse_tool_call(buffer) {
                     events.push(evt);
+                } else if !buffer.is_empty() {
+                    tracing::warn!(
+                        json = %buffer,
+                        "failed to parse tool_call JSON at flush — emitting raw text instead of dropping it"
+                    );
+                    events.push(ParsedEvent::TextToken(std::mem::take(buffer)));
                 }
             }
             State::Text => {
@@ -187,7 +193,19 @@ impl StreamParser {
                         if let Some(evt) = try_parse_tool_call(&buffer) {
                             events.push(evt);
                         } else {
-                            tracing::warn!(json = %buffer, "failed to parse tool_call JSON");
+                            // Never silently drop the model's attempted tool
+                            // call — an unparseable one still represents real
+                            // intent (e.g. a malformed-but-recognizable bash
+                            // call), and dropping it produces a response that
+                            // looks like a clean, empty "stop" to the client
+                            // with no signal that anything went wrong.
+                            tracing::warn!(
+                                json = %buffer,
+                                "failed to parse tool_call JSON — emitting raw text instead of dropping it"
+                            );
+                            if !buffer.is_empty() {
+                                events.push(ParsedEvent::TextToken(buffer));
+                            }
                         }
                         // Continue processing remainder in Text state.
                     } else {
@@ -213,13 +231,70 @@ impl Default for StreamParser {
 
 // â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+/// Find `"key"` in `buf` and return the quoted value that follows it,
+/// tolerating a malformed or missing separator between key and value (`:`,
+/// `=`, whitespace, or the key's closing quote being dropped entirely) —
+/// only the JSON *value* needs to be well-formed, not the syntax around it.
+fn extract_value_after_key(buf: &str, key: &str) -> Option<String> {
+    let key_pat = format!("\"{key}");
+    let n_start = buf.find(&key_pat)?;
+    let rest = &buf[n_start + key_pat.len()..];
+    // Skip the key's closing quote, if the model included one.
+    let rest = rest.strip_prefix('"').unwrap_or(rest);
+    // Skip separator chars between key and value.
+    let rest = rest.trim_start_matches(|c: char| c == ':' || c == '=' || c.is_whitespace());
+    // The value is usually its own well-formed quoted string (`"name": "bash"`),
+    // but can also share the key's own quote pair with no separate opening
+    // quote at all — e.g. `"function=read"` as a single JSON string literal,
+    // where key and value were merged instead of split into a proper pair.
+    // Either way, the value itself runs up to the next quote character.
+    let rest = rest.strip_prefix('"').unwrap_or(rest);
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// Find the index of the `}` that closes the `{` at `open_idx`, accounting
+/// for nesting and braces inside quoted strings. `buf.rfind('}')` alone
+/// (the previous approach) picks the *last* `}` in the whole buffer, which
+/// is wrong whenever there's more than one JSON object in scope — e.g. an
+/// outer malformed wrapper around a well-formed nested `arguments` object,
+/// where the last `}` closes the *outer* object, not the one being scanned.
+fn find_matching_brace(buf: &str, open_idx: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, c) in buf.char_indices().skip(open_idx) {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' if in_string => escaped = true,
+            '"' => in_string = !in_string,
+            '{' if !in_string => depth += 1,
+            '}' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Try to parse a tool call JSON buffer into a [`ParsedEvent::ToolCallReady`].
 fn try_parse_tool_call(buf: &str) -> Option<ParsedEvent> {
     let trimmed = buf.trim();
 
     // First try standard JSON
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
+        if let Some(name) = v
+            .get("name")
+            .or_else(|| v.get("function"))
+            .and_then(|n| n.as_str())
+        {
             let mut arguments = v
                 .get("arguments")
                 .or_else(|| v.get("parameters"))
@@ -242,13 +317,15 @@ fn try_parse_tool_call(buf: &str) -> Option<ParsedEvent> {
     // Fallback: Model hallucinated XML tags (e.g. <function_name>Write</function_name> or <Write>) OR produced invalid JSON structure
     let mut ext_name = None;
 
-    // Try to extract name from `"name": "bash"` directly
-    if let Some(n_start) = buf.find(r#""name""#) {
-        let rest = &buf[n_start + 6..];
-        if let Some(quote1) = rest.find('"') {
-            if let Some(quote2) = rest[quote1 + 1..].find('"') {
-                ext_name = Some(rest[quote1 + 1..quote1 + 1 + quote2].to_string());
-            }
+    // Try to extract name from `"name": "bash"` or `"function": "bash"` directly.
+    // Tolerates the key/value separator being malformed (e.g. `"name="bash"`
+    // with an `=` instead of `:` — an occasional model generation glitch)
+    // since we only care about locating the quoted value, not validating the
+    // JSON structure around it.
+    for key in ["name", "function"] {
+        if let Some(name) = extract_value_after_key(buf, key) {
+            ext_name = Some(name);
+            break;
         }
     }
 
@@ -274,25 +351,23 @@ fn try_parse_tool_call(buf: &str) -> Option<ParsedEvent> {
     let mut search_idx = 0;
     while let Some(start) = buf[search_idx..].find('{') {
         let abs_start = search_idx + start;
-        if let Some(end) = buf.rfind('}') {
-            if end >= abs_start {
-                let json_slice = &buf[abs_start..=end];
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_slice) {
-                    if let Some(obj) = parsed.as_object() {
-                        if obj.contains_key("arguments") {
-                            arguments = obj["arguments"].clone();
-                            break;
-                        } else if obj.contains_key("name")
-                            && obj.len() <= 2
-                            && !obj.contains_key("command")
-                        {
-                            // Probably parsed the outer shell successfully but it didn't contain anything useful
-                            // Just continue searching inner brackets!
-                        } else {
-                            // Direct arguments embedded (e.g., {"command": "..."})
-                            arguments = parsed;
-                            break;
-                        }
+        if let Some(end) = find_matching_brace(buf, abs_start) {
+            let json_slice = &buf[abs_start..=end];
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_slice) {
+                if let Some(obj) = parsed.as_object() {
+                    if obj.contains_key("arguments") {
+                        arguments = obj["arguments"].clone();
+                        break;
+                    } else if obj.contains_key("name")
+                        && obj.len() <= 2
+                        && !obj.contains_key("command")
+                    {
+                        // Probably parsed the outer shell successfully but it didn't contain anything useful
+                        // Just continue searching inner brackets!
+                    } else {
+                        // Direct arguments embedded (e.g., {"command": "..."})
+                        arguments = parsed;
+                        break;
                     }
                 }
             }
@@ -360,7 +435,7 @@ mod tests {
             .collect();
         assert!(!thinking.is_empty());
 
-        assert!(evts.iter().any(|e| *e == ParsedEvent::ThinkingEnd));
+        assert!(evts.contains(&ParsedEvent::ThinkingEnd));
 
         let text: Vec<_> = evts
             .iter()
@@ -378,7 +453,7 @@ mod tests {
         assert!(evts
             .iter()
             .any(|e| matches!(e, ParsedEvent::ThinkingToken(_))));
-        assert!(evts.iter().any(|e| *e == ParsedEvent::ThinkingEnd));
+        assert!(evts.contains(&ParsedEvent::ThinkingEnd));
     }
 
     #[test]
@@ -404,10 +479,131 @@ mod tests {
     }
 
     #[test]
+    fn tool_call_with_function_key_parsed_correctly() {
+        // Qwen3 sometimes emits `"function"` instead of the OpenAI-standard `"name"` key.
+        let mut p = StreamParser::new();
+        let evts = feed(
+            &mut p,
+            &[
+                "<tool_call>\n",
+                r#"{"function": "bash", "arguments": {"command": "ls"}}"#,
+                "\n</tool_call>",
+            ],
+        );
+
+        let tool_evt = evts
+            .iter()
+            .find(|e| matches!(e, ParsedEvent::ToolCallReady { .. }));
+        assert!(tool_evt.is_some());
+        if let Some(ParsedEvent::ToolCallReady { name, arguments }) = tool_evt {
+            assert_eq!(name, "bash");
+            assert_eq!(arguments["command"], "ls");
+        }
+    }
+
+    #[test]
     fn no_thinking_block_emits_only_text() {
         let mut p = StreamParser::new();
         let evts = feed(&mut p, &["Just a plain response."]);
         assert!(evts.iter().all(|e| matches!(e, ParsedEvent::TextToken(_))));
-        assert!(!evts.iter().any(|e| *e == ParsedEvent::ThinkingEnd));
+        assert!(!evts.contains(&ParsedEvent::ThinkingEnd));
+    }
+
+    #[test]
+    fn tool_call_with_equals_separator_still_parses_name() {
+        // Observed in production: model emitted `"name="bash"` (missing colon)
+        // instead of `"name": "bash"`. The strict JSON parse fails, but the
+        // fallback should still recover the tool name rather than dropping
+        // the whole call.
+        let mut p = StreamParser::new();
+        let evts = feed(
+            &mut p,
+            &[
+                "<tool_call>\n",
+                r#"{"name="bash", "arguments": {"command":"true"}}"#,
+                "\n</tool_call>",
+            ],
+        );
+
+        let tool_evt = evts
+            .iter()
+            .find(|e| matches!(e, ParsedEvent::ToolCallReady { .. }));
+        assert!(
+            tool_evt.is_some(),
+            "expected a recovered tool call, got: {evts:?}"
+        );
+        if let Some(ParsedEvent::ToolCallReady { name, .. }) = tool_evt {
+            assert_eq!(name, "bash");
+        }
+    }
+
+    #[test]
+    fn tool_call_with_merged_key_and_value_recovers_name_and_arguments() {
+        // Observed in production 2026-08-29: model emitted `"function=read"`
+        // as a single JSON string literal — key and value merged inside one
+        // quote pair, not even a separate (if malformed) value token like
+        // the `"name="bash"` case above. Previously this fell all the way
+        // through to the raw-text fallback; both the name and the nested
+        // `arguments` object should now be recovered.
+        let mut p = StreamParser::new();
+        let evts = feed(
+            &mut p,
+            &[
+                "<tool_call>\n",
+                r#"{"function=read", "arguments": {"limit": 116, "offset": 20, "path": "J:/Projects/quake-remake/PLAN-phase2.md"}}"#,
+                "\n</tool_call>",
+            ],
+        );
+
+        let tool_evt = evts
+            .iter()
+            .find(|e| matches!(e, ParsedEvent::ToolCallReady { .. }));
+        assert!(
+            tool_evt.is_some(),
+            "expected a recovered tool call, got: {evts:?}"
+        );
+        if let Some(ParsedEvent::ToolCallReady { name, arguments }) = tool_evt {
+            assert_eq!(name, "read");
+            assert_eq!(arguments["limit"], 116);
+            assert_eq!(arguments["offset"], 20);
+            assert_eq!(arguments["path"], "J:/Projects/quake-remake/PLAN-phase2.md");
+        }
+    }
+
+    #[test]
+    fn unparseable_tool_call_emits_raw_text_instead_of_dropping() {
+        // No recognizable "name"/"function" key at all — try_parse_tool_call
+        // returns None. The buffered text must still surface to the caller
+        // instead of vanishing, so a response never silently collapses to
+        // empty content with finish_reason=stop.
+        let mut p = StreamParser::new();
+        let evts = feed(
+            &mut p,
+            &[
+                "<tool_call>\n",
+                "not json at all",
+                "\n</tool_call>",
+                "after",
+            ],
+        );
+
+        assert!(
+            !evts
+                .iter()
+                .any(|e| matches!(e, ParsedEvent::ToolCallReady { .. })),
+            "garbage input should not fabricate a tool call"
+        );
+        let combined: String = evts
+            .iter()
+            .filter_map(|e| {
+                if let ParsedEvent::TextToken(t) = e {
+                    Some(t.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(combined.contains("not json at all"));
+        assert!(combined.contains("after"));
     }
 }

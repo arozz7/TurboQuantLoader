@@ -104,15 +104,24 @@ pub async fn create_message(
         })
         .collect();
 
-    let temperature = req.temperature.unwrap_or(0.6);
-    let top_p = req.top_p.unwrap_or(0.95);
+    let temperature = req.temperature.or(cfg.backend.temperature).unwrap_or(0.6);
+    let top_p = req.top_p.or(cfg.backend.top_p).unwrap_or(0.95);
     let top_k = req.top_k.unwrap_or(20);
+    let min_p = req.min_p.or(cfg.backend.min_p);
     let base_url = proc.base_url();
     let http = proc.http_client().clone();
 
     if req.stream {
         let url = format!("{base_url}/v1/chat/completions");
-        let body = build_chat_body(&messages, true, max_tokens, temperature, top_p, top_k);
+        let body = build_chat_body(
+            &messages,
+            true,
+            max_tokens,
+            temperature,
+            top_p,
+            top_k,
+            min_p,
+        );
         let rx = spawn_tracked_reader(&http, &url, body, state.metrics.clone(), model_name.clone())
             .await?;
         Ok(streaming_response(
@@ -124,7 +133,15 @@ pub async fn create_message(
         ))
     } else {
         let url = format!("{base_url}/v1/chat/completions");
-        let body = build_chat_body(&messages, false, max_tokens, temperature, top_p, top_k);
+        let body = build_chat_body(
+            &messages,
+            false,
+            max_tokens,
+            temperature,
+            top_p,
+            top_k,
+            min_p,
+        );
         let start = Instant::now();
         state
             .metrics
@@ -149,6 +166,10 @@ pub async fn create_message(
             .to_string();
         let prompt_tokens = json["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32;
         let completion_tokens = json["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32;
+        let cached_tokens = json["usage"]["prompt_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .or_else(|| json["usage"]["tokens_cached"].as_u64())
+            .unwrap_or(0) as u32;
         let finish_reason = json["choices"][0]["finish_reason"]
             .as_str()
             .unwrap_or("stop")
@@ -190,6 +211,7 @@ pub async fn create_message(
                 prompt_tokens,
                 completion_tokens,
                 finish_reason,
+                cached_tokens,
             })
             .await;
         state
@@ -377,7 +399,13 @@ fn streaming_response(
         let mut model_stream = ReceiverStream::new(rx);
         while let Some(model_event) = model_stream.next().await {
             match model_event {
-                GenerateEvent::Token(text) => {
+                // The Anthropic Messages API has its own native "thinking"
+                // content-block type; wiring that up is out of scope here.
+                // For now, treat reasoning text the same as regular content
+                // so it's visible to the client rather than silently dropped
+                // (see GenerateEvent::Reasoning's doc comment for why this
+                // now arrives as a separate event at all).
+                GenerateEvent::Token(text) | GenerateEvent::Reasoning(text) => {
                     response_buf.push_str(&text);
                     let events = parser.push(&text);
                     if emit_parsed(

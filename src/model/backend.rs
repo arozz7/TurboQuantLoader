@@ -60,6 +60,12 @@ pub struct GenerateRequest {
 pub enum GenerateEvent {
     /// A decoded text fragment (one or more unicode characters).
     Token(String),
+    /// A reasoning/thinking text fragment, carried in a backend's native
+    /// `delta.reasoning_content` field (distinct from `Token`/`delta.content`).
+    /// llama-server's streaming endpoint reports reasoning this way for chat
+    /// templates that support it, rather than embedding `<think>` tags
+    /// inline in the content stream the way its non-streaming endpoint does.
+    Reasoning(String),
     /// Generation finished successfully; carries timing and usage stats.
     Done(GenerateSummary),
     /// Generation stopped due to an error; the string is a human-readable message.
@@ -77,6 +83,8 @@ pub struct GenerateSummary {
     pub context_tokens: u32,
     /// The reason generation stopped (e.g., "stop", "length").
     pub finish_reason: String,
+    /// Prompt tokens served from the KV prefix cache (0 if not reported by backend).
+    pub cached_tokens: u32,
 }
 
 /// Async channel receiver that delivers [`GenerateEvent`]s from the backend.
@@ -126,7 +134,7 @@ pub trait ModelBackend: Send + Sync {
     ///
     /// Model weights remain loaded — only the `LlamaContext` is rebuilt, which
     /// is fast (~50 ms). Used by the `bench` command to test multiple
-    /// (context_size × kv_bits) configurations without reloading the model.
+    /// (context_size × kv_type) configurations without reloading the model.
     ///
     /// Default implementation is a no-op (backends that don't support
     /// reconfiguration at runtime simply ignore the call).
